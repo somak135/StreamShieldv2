@@ -20,7 +20,7 @@ class LibraryTest {
 
     private val context: Context get() = ApplicationProvider.getApplicationContext()
 
-    /** Builds a version-1 database exactly as Room created it, then opens it with version 2. */
+    /** Builds a version-1 database exactly as Room created it, then opens it with the current version (migrations 1 → 4). */
     @Test
     fun `migration 1 to 2 keeps old history and matches the entities`() = runBlocking {
         val name = "migration-test.db"

@@ -32,8 +32,6 @@ data class DownloadPlan(
     val container: Container,
     val label: String
 ) {
-    /** A single stream that already has sound: saved as it is, no merging. */
-    val single: Boolean get() = video == null || audio == null
 
     fun estimatedBytes(durationSec: Long): Long {
         val bitsPerSec = (video?.bitrate ?: 0).toLong() + (audio?.bitrate ?: 0).toLong()

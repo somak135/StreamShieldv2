@@ -73,7 +73,7 @@ object NewPipeSupport {
                 MediaFormat.WEBM -> Container.WEBM
                 else -> return@mapNotNull null
             }
-            val height = if (s.height > 0) s.height else heightFromResolution(s.resolution.orEmpty())
+            val height = if (s.height > 0) s.height else heightFromResolution(s.getResolution().orEmpty())
             if (height <= 0) return@mapNotNull null
             VideoCandidate(
                 url = s.content,
@@ -82,7 +82,7 @@ object NewPipeSupport {
                 codec = s.codec.orEmpty().lowercase(),
                 bitrate = s.bitrate,
                 container = container,
-                videoOnly = s.isVideoOnly
+                videoOnly = s.isVideoOnly()
             )
         }
     }

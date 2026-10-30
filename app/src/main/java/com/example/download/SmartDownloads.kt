@@ -43,6 +43,10 @@ object SmartDownloads {
     /** Daily refresh on Wi-Fi while charging (the user's choice), or nothing if turned off. */
     fun schedule(context: Context, sizeMb: Int) {
         val work = WorkManager.getInstance(context)
+        if (sizeMb <= 0) {
+            work.cancelUniqueWork(PERIODIC_WORK)
+            return
+        }
         val request = PeriodicWorkRequestBuilder<SmartDownloadWorker>(1, TimeUnit.DAYS)
             .setConstraints(dailyConstraints())
             .build()
@@ -186,7 +190,7 @@ object SmartDownloads {
 
         // Songs that dropped out (and unfinished smart rows that are no longer wanted).
         val wanted = plan.all.map { it.song.videoId }.toSet()
-        smartItems.filter { it.videoId in plan.remove || (it.videoId !in wanted && !it.isDone) }
+        smartItems.filter { it.videoId in plan.remove || (it.videoId !in wanted && it.videoId !in downloaded) }
             .forEach { removeSmart(context, it) }
         plan.keep.forEachIndexed { index, r ->
             offline.updateSmartRank(OfflineItemEntity.idFor(r.song.videoId, true), r.section.name, index)

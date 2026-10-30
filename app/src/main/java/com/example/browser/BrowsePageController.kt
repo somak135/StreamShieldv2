@@ -234,6 +234,10 @@ class BrowsePageController(
         @JavascriptInterface
         fun likeState(videoId: String?): String = ""
 
+        /** YouTube Music plays in the player page only. */
+        @JavascriptInterface
+        fun onMusicQueue(json: String?) = Unit
+
         @JavascriptInterface
         fun onResumeResult(result: String?) = Unit
 

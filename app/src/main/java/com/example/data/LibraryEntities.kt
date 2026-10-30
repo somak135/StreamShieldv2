@@ -5,11 +5,12 @@ import androidx.room.Entity
 import androidx.room.PrimaryKey
 
 /**
- * Local library (database version 2). Nothing here needs a YouTube account: subscriptions,
+ * Local library (added in database version 2). Nothing here needs a YouTube account: subscriptions,
  * history, playlists and likes live only on the device.
  *
- * Every table has a plain primary key and no indices or defaults, so the hand-written migration
- * in [StreamShieldDatabase] stays easy to keep in sync with these classes.
+ * Every table has a plain primary key and no indices, so the hand-written migrations in
+ * [StreamShieldDatabase] stay easy to keep in sync with these classes. A column added later needs
+ * a default in both the entity (`@ColumnInfo(defaultValue = …)`) and its `ALTER TABLE`.
  */
 
 /** Metadata cache for any video the app has seen (page state, feeds, imports). */

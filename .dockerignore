@@ -1,0 +1,2 @@
+# The repository is mounted at runtime, not copied into the image.
+*

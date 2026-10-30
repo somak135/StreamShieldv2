@@ -73,6 +73,7 @@ class ForYouRepository(private val context: Context) {
     val state: StateFlow<State> = _state.asStateFlow()
 
     private val mutex = Mutex()
+    private val fileLock = Any()
     private val file: File get() = File(context.filesDir, FILE_NAME)
     private val feeds = SubscriptionFeedClient()
 
@@ -429,11 +430,14 @@ class ForYouRepository(private val context: Context) {
                 })
                 root.put("seen", JSONArray(seen.toList()))
             }
-            val tmp = File(context.filesDir, "$FILE_NAME.tmp")
-            tmp.writeText(root.toString())
-            if (!tmp.renameTo(file)) {
-                file.writeText(root.toString())
-                tmp.delete()
+            // persist() can run while a refresh saves; both write the same temporary file.
+            synchronized(fileLock) {
+                val tmp = File(context.filesDir, "$FILE_NAME.tmp")
+                tmp.writeText(root.toString())
+                if (!tmp.renameTo(file)) {
+                    file.writeText(root.toString())
+                    tmp.delete()
+                }
             }
         } catch (_: Exception) {
         }

@@ -44,6 +44,12 @@ import com.example.download.SmartDownloads
 import com.example.download.NewPipeSupport
 import com.example.recommend.ForYouRepository
 import com.example.recommend.ForYouVideo
+import com.example.recommend.MusicForYouRepository
+import com.example.recommend.MusicSong
+import com.example.recommend.YouTubeMusicHome
+import com.example.recommend.YtmHomeState
+import com.example.recommend.YtmItem
+import com.example.recommend.YtmPage
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import org.json.JSONObject
@@ -77,13 +83,14 @@ import kotlinx.coroutines.withContext
 
 const val HOME_URL = "https://m.youtube.com"
 const val MUSIC_HOME_URL = "https://music.youtube.com"
+/** YouTube Music's own home shelves are loaded again after this (or on pull-down). */
+private const val YTM_HOME_TTL_MS = 60L * 60 * 1000
+/** Pages of YouTube Music's home shelves loaded as the music home is scrolled. */
+private const val YTM_MAX_PAGES = 6
 
 data class BrowserUiState(
     val url: String = HOME_URL,
-    val title: String = "",
-    val isLoading: Boolean = false,
-    val canGoBack: Boolean = false,
-    val canGoForward: Boolean = false
+    val isLoading: Boolean = false
 )
 
 data class BlockCounts(val ads: Long = 0L, val requests: Long = 0L)
@@ -254,8 +261,8 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Requests for the activity to load a URL in the WebView (the controller lives there).
-    private val _openUrlRequests = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4)
-    val openUrlRequests: kotlinx.coroutines.flow.SharedFlow<String> = _openUrlRequests
+    private val _openUrlRequests = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val openUrlRequests: SharedFlow<String> = _openUrlRequests
 
     private val _pendingImport = MutableStateFlow<PendingImport?>(null)
     val pendingImport: StateFlow<PendingImport?> = _pendingImport.asStateFlow()
@@ -294,8 +301,8 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     val browsePage: StateFlow<BrowsePageState> = _browsePage.asStateFlow()
 
     // Requests for the activity to load a URL in the browse page.
-    private val _browseRequests = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4)
-    val browseRequests: kotlinx.coroutines.flow.SharedFlow<String> = _browseRequests
+    private val _browseRequests = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val browseRequests: SharedFlow<String> = _browseRequests
 
     private val _playbackSource = MutableStateFlow(PlaybackSource.WEB)
     val playbackSource: StateFlow<PlaybackSource> = _playbackSource.asStateFlow()
@@ -307,8 +314,8 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     private val _downloadSheet = MutableStateFlow<DownloadSheetState?>(null)
     val downloadSheet: StateFlow<DownloadSheetState?> = _downloadSheet.asStateFlow()
 
-    private val _offlinePlayRequests = kotlinx.coroutines.flow.MutableSharedFlow<OfflinePlayRequest>(extraBufferCapacity = 2)
-    val offlinePlayRequests: kotlinx.coroutines.flow.SharedFlow<OfflinePlayRequest> = _offlinePlayRequests
+    private val _offlinePlayRequests = MutableSharedFlow<OfflinePlayRequest>(extraBufferCapacity = 2)
+    val offlinePlayRequests: SharedFlow<OfflinePlayRequest> = _offlinePlayRequests
 
     /** The offline player fills the screen (true) or shows as the mini-player (false). */
     private val _offlineExpanded = MutableStateFlow(false)
@@ -378,7 +385,14 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     fun setAppVisible(visible: Boolean) {
         _appVisible.value = visible
         if (visible && _currentTab.value == AppTab.HOME) refreshForYou(force = false)
-        if (!visible) viewModelScope.launch(Dispatchers.IO) { forYou.persist() }
+        if (visible && _currentTab.value == AppTab.MUSIC && !_musicPageShown.value) {
+            refreshMusicForYou(force = false)
+            loadYtmHome(force = false)
+        }
+        if (!visible) viewModelScope.launch(Dispatchers.IO) {
+            forYou.persist()
+            musicForYou.persist()
+        }
     }
 
     // ---- For you (Home) ----
@@ -387,6 +401,25 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     private val _homeRefreshing = MutableStateFlow(false)
     val homeRefreshing: StateFlow<Boolean> = _homeRefreshing.asStateFlow()
     private var homeRefreshJob: Job? = null
+
+    // ---- Music tab: the app's music home (For you, recently played) or YouTube Music's page ----
+    private val musicForYou = MusicForYouRepository(application)
+    val musicForYouState: StateFlow<MusicForYouRepository.State> = musicForYou.state
+    private val _musicRefreshing = MutableStateFlow(false)
+    val musicRefreshing: StateFlow<Boolean> = _musicRefreshing.asStateFlow()
+    private var musicRefreshJob: Job? = null
+    /** The Music tab shows YouTube Music's page (true) or the app's music home (false). */
+    private val _musicPageShown = MutableStateFlow(false)
+    val musicPageShown: StateFlow<Boolean> = _musicPageShown.asStateFlow()
+    /** YouTube Music pages to open without stopping a song that plays (see BrowserController). */
+    private val _musicPageRequests = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val musicPageRequests: SharedFlow<String> = _musicPageRequests
+    /** YouTube Music's own home shelves, under the music home's own ones. */
+    private val _ytmHome = MutableStateFlow(YtmHomeState())
+    val ytmHome: StateFlow<YtmHomeState> = _ytmHome.asStateFlow()
+    private var ytmPage: YtmPage? = null
+    private var ytmPages = 0
+    private var ytmJob: Job? = null
 
     // ---- pull-down on web pages ----
     private val _webPull = MutableStateFlow<WebPull?>(null)
@@ -400,10 +433,10 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
 
     /** What a pull-down does on the player page: minimize a video, refresh YouTube Music. */
     val playerPullMode: StateFlow<String> by lazy {
-        combine(_playerExpanded, _webPageUrl, _browserState, _currentTab) { expanded, pageUrl, browser, tab ->
+        combine(_playerExpanded, _webPageUrl, _browserState, _currentTab, _musicPageShown) { expanded, pageUrl, browser, tab, musicPage ->
             when {
                 expanded && isYouTubeVideoPage(pageUrl) -> "minimize"
-                !expanded && tab == AppTab.MUSIC && browser.url.startsWith(MUSIC_HOME_URL) -> "refresh"
+                !expanded && tab == AppTab.MUSIC && musicPage && browser.url.startsWith(MUSIC_HOME_URL) -> "refresh"
                 else -> "off"
             }
         }.distinctUntilChanged().stateIn(viewModelScope, SharingStarted.Eagerly, "off")
@@ -463,6 +496,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), BlockCounts())
     private var flushJob: Job? = null
     private val flushMutex = Mutex()
+    private val progressMutex = Mutex()
 
     private var bannerJob: Job? = null
     private var sponsorJob: Job? = null
@@ -479,10 +513,11 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         }
         viewModelScope.launch(Dispatchers.IO) {
             library.ensureBuiltInPlaylists()
-            // Refresh subscriptions on start if the last refresh is older than an hour.
+            // Refresh subscriptions on start if the last refresh is older than an hour. The newest
+            // refresh decides: a channel whose feed keeps failing never gets a new time.
             val subs = library.allSubscriptions()
-            val oldest = subs.minOfOrNull { it.lastRefreshedAt } ?: Long.MAX_VALUE
-            if (subs.isNotEmpty() && System.currentTimeMillis() - oldest > 60 * 60_000L) refreshFeeds()
+            val newest = subs.maxOfOrNull { it.lastRefreshedAt } ?: Long.MAX_VALUE
+            if (subs.isNotEmpty() && System.currentTimeMillis() - newest > 60 * 60_000L) refreshFeeds()
         }
         viewModelScope.launch {
             PlaybackCommands.flow.collect { command ->
@@ -526,21 +561,16 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             forYou.load()
             refreshForYou(force = false)
         }
+        viewModelScope.launch(Dispatchers.IO) { musicForYou.load() }
     }
 
     // ---------------------------------------------------------------------------------------
     // Navigation & page state
     // ---------------------------------------------------------------------------------------
 
-    fun onPageChanged(url: String, title: String?, canBack: Boolean, canForward: Boolean, loading: Boolean) {
+    fun onPageChanged(url: String, loading: Boolean) {
         val previousUrl = _browserState.value.url
-        _browserState.value = BrowserUiState(
-            url = url,
-            title = title?.takeIf { it.isNotBlank() && !it.startsWith("http") } ?: _browserState.value.title,
-            isLoading = loading,
-            canGoBack = canBack,
-            canGoForward = canForward
-        )
+        _browserState.value = BrowserUiState(url = url, isLoading = loading)
         if (url != previousUrl) {
             _webPageUrl.value = url
             handleSearchPage(url)
@@ -555,7 +585,9 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
 
     /** YouTube logo (or an in-page link to YouTube's home page): the app's Home tab instead. */
     fun onHomeLogoTapped() {
-        if (_currentTab.value == AppTab.MUSIC && !_playerExpanded.value && _browserState.value.url.startsWith(MUSIC_HOME_URL)) return
+        if (_currentTab.value == AppTab.MUSIC && !_playerExpanded.value && _musicPageShown.value &&
+            _browserState.value.url.startsWith(MUSIC_HOME_URL)
+        ) return
         _browseTab.value = null
         _playerExpanded.value = false
         _showActionsSheet.value = false
@@ -698,7 +730,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         val writeMetadata = newSession || (state.channelId.isNotBlank() && metadataWrittenFor != state.videoId)
         if (state.channelId.isNotBlank()) metadataWrittenFor = state.videoId
         val snapshot = state
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch(Dispatchers.IO) { progressMutex.withLock {
             if (writeMetadata) {
                 library.rememberVideo(
                     videoId = snapshot.videoId,
@@ -711,7 +743,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
                 )
             }
             library.recordProgress(snapshot.videoId, position, duration, snapshot.isMusic, newSession)
-        }
+        } }
         playLog.trySend(
             if (newSession) {
                 PlayLogOp.Start(state.videoId, System.currentTimeMillis(), position, duration, state.isMusic)
@@ -794,6 +826,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         scheduleCountFlush()
     }
 
+    @Synchronized
     private fun scheduleCountFlush() {
         if (flushJob?.isActive == true) return
         flushJob = viewModelScope.launch {
@@ -832,7 +865,12 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             stopBackgroundSession()
             return
         }
-        val playing = state.isPlaying || holdThroughAutoplayGap(state)
+        // Always evaluated (not `isPlaying || hold…`): it is also what ends the gap once the next
+        // video plays. Skipped, the gap timed out as OVER and stayed so, and the next video's end
+        // took the service out of the foreground, which Android does not let it re-enter while
+        // the screen is off.
+        val holding = holdThroughAutoplayGap(state)
+        val playing = state.isPlaying || holding
         // Nothing to show until something actually plays; after that keep the controls updated.
         if (!playing && !bgSessionActive) return
         val signature = "${state.title}|${state.channel}|${state.durationSec}|$playing"
@@ -945,6 +983,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
 
     fun showBanner(message: String) = showBannerFor(message, 2500L)
 
+    @Synchronized
     private fun showBannerFor(message: String, durationMs: Long) {
         bannerJob?.cancel()
         _statusBanner.value = message
@@ -1168,6 +1207,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
                 switchToWebPlayback()
                 _webPageUrl.value = url
                 _currentTab.value = AppTab.MUSIC
+                _musicPageShown.value = true
                 _playerExpanded.value = false
                 _openUrlRequests.tryEmit(url)
             }
@@ -1189,20 +1229,66 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         _playerExpanded.value = false
         if (tab == AppTab.HOME) refreshForYou(force = false)
         if (tab == AppTab.MUSIC) {
-            // One page at a time: opening YouTube Music replaces the YouTube page. Do it right away
-            // unless a video is playing; then the Music tab asks first.
-            val onMusic = _browserState.value.url.startsWith(MUSIC_HOME_URL)
-            val video = _videoState.value
-            val videoPlaying = video.isPlaying && !video.isMusicPage
-            if (!onMusic && !videoPlaying) _openUrlRequests.tryEmit(MUSIC_HOME_URL)
+            // The Music tab opens on the app's music home (also when tapped again on YouTube
+            // Music's page). YouTube Music itself is loaded only when a song, a search or its
+            // home is opened from there, so a paused video is not replaced on the way.
+            _musicPageShown.value = false
+            refreshMusicForYou(force = false)
+            loadYtmHome(force = false)
         }
     }
 
+    /**
+     * YouTube Music's own home page. With a song loaded there, its page is shown as it is
+     * (loading the home page would stop the song).
+     */
     fun openYouTubeMusic() {
         switchToWebPlayback()
         _currentTab.value = AppTab.MUSIC
         _playerExpanded.value = false
-        _openUrlRequests.tryEmit(MUSIC_HOME_URL)
+        _musicPageShown.value = true
+        val video = _videoState.value
+        val songLoaded = _browserState.value.url.startsWith(MUSIC_HOME_URL) && video.isMusicPage && video.videoId.isNotBlank()
+        if (!songLoaded) _openUrlRequests.tryEmit(MUSIC_HOME_URL)
+    }
+
+    /** Back to YouTube Music's page as it is (the song's player): the music mini-player's tap. */
+    fun showMusicPage() {
+        if (!_browserState.value.url.startsWith(MUSIC_HOME_URL)) {
+            openYouTubeMusic()
+            return
+        }
+        _currentTab.value = AppTab.MUSIC
+        _playerExpanded.value = false
+        _musicPageShown.value = true
+    }
+
+    /** From YouTube Music's page back to the app's music home (the song keeps playing). */
+    fun showMusicHome() {
+        _currentTab.value = AppTab.MUSIC
+        _musicPageShown.value = false
+    }
+
+    /** A song from the music home: plays in YouTube Music, whose radio continues after it. */
+    fun playSong(videoId: String) {
+        if (videoId.isBlank()) return
+        musicForYou.opened(videoId)
+        openLink("$MUSIC_HOME_URL/watch?v=$videoId")
+    }
+
+    /** A search from the music home, on YouTube Music's search page (a playing song goes on). */
+    fun searchMusic(query: String) {
+        val q = query.trim()
+        if (q.isEmpty()) return
+        youTubeLinkOrNull(q)?.let { link ->
+            openLink(link)
+            return
+        }
+        switchToWebPlayback()
+        _currentTab.value = AppTab.MUSIC
+        _playerExpanded.value = false
+        _musicPageShown.value = true
+        _musicPageRequests.tryEmit("$MUSIC_HOME_URL/search?q=" + Uri.encode(q))
     }
 
     fun expandPlayer() {
@@ -1293,6 +1379,132 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     fun forYouOpened(videoId: String) = forYou.opened(videoId)
 
     // ---------------------------------------------------------------------------------------
+    // For you (Music tab)
+    // ---------------------------------------------------------------------------------------
+
+    /** Rebuilds the Music tab's "For you" list ([force]: even if it is recent). */
+    fun refreshMusicForYou(force: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) { musicForYou.refresh(force) }
+    }
+
+    /** Pull-down on the music home: a new list. */
+    fun refreshMusicHome() {
+        if (musicRefreshJob?.isActive == true) return
+        musicRefreshJob = viewModelScope.launch(Dispatchers.IO) {
+            _musicRefreshing.value = true
+            try {
+                loadYtmHome(force = true)
+                musicForYou.refresh(force = true)
+            } finally {
+                _musicRefreshing.value = false
+            }
+        }
+    }
+
+    /** A radio (YouTube Music's endless mix) started from a song. */
+    fun playRadio(videoId: String) {
+        if (videoId.isBlank()) return
+        openLink("$MUSIC_HOME_URL/watch?v=$videoId&list=RDAMVM$videoId")
+    }
+
+    /** An artist's page in YouTube Music (a search for the name if the channel is not known). */
+    fun openMusicArtist(channelId: String, name: String) {
+        if (channelId.startsWith("UC")) openLink("$MUSIC_HOME_URL/channel/$channelId")
+        else searchMusic(name.removeSuffix(" - Topic"))
+    }
+
+    // ---- YouTube Music's own home shelves --------------------------------------------------
+
+    /** Loads YouTube Music's home (or the selected chip's), unless loaded within the hour. */
+    fun loadYtmHome(force: Boolean) {
+        val current = _ytmHome.value
+        if (!force && (current.loading || (current.shelves.isNotEmpty() &&
+                System.currentTimeMillis() - current.loadedAt < YTM_HOME_TTL_MS))
+        ) return
+        ytmJob?.cancel()
+        val chip = current.selected
+        ytmJob = viewModelScope.launch(Dispatchers.IO) {
+            _ytmHome.update { it.copy(loading = true, error = "") }
+            try {
+                val page = YouTubeMusicHome.fetch(chip)
+                ytmPage = page
+                ytmPages = 1
+                _ytmHome.update {
+                    it.copy(
+                        chips = if (chip.isBlank() && page.chips.isNotEmpty()) page.chips else it.chips,
+                        shelves = page.shelves,
+                        loading = false,
+                        hasMore = page.continuation.isNotBlank(),
+                        loadedAt = System.currentTimeMillis()
+                    )
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("StreamShield", "YouTube Music home", e)
+                val why = listOfNotNull(e.javaClass.simpleName, e.message?.take(100)).joinToString(": ")
+                _ytmHome.update { it.copy(loading = false, error = "YouTube Music's own shelves could not be loaded ($why). Pull down to try again.") }
+            }
+        }
+    }
+
+    /** A mood chip: YouTube Music's home for it (the same chip again: the whole home). */
+    fun selectYtmChip(params: String) {
+        val next = if (_ytmHome.value.selected == params) "" else params
+        _ytmHome.update { it.copy(selected = next, shelves = emptyList(), hasMore = false) }
+        loadYtmHome(force = true)
+    }
+
+    /** The end of the shelves was reached: YouTube Music's next ones (a few pages at most). */
+    fun loadMoreYtm() {
+        val page = ytmPage ?: return
+        if (page.continuation.isBlank() || ytmPages >= YTM_MAX_PAGES || ytmJob?.isActive == true) return
+        ytmJob = viewModelScope.launch(Dispatchers.IO) {
+            _ytmHome.update { it.copy(loadingMore = true) }
+            try {
+                val next = YouTubeMusicHome.more(page)
+                ytmPage = next
+                ytmPages++
+                _ytmHome.update {
+                    it.copy(
+                        shelves = it.shelves + next.shelves,
+                        loadingMore = false,
+                        hasMore = next.continuation.isNotBlank() && ytmPages < YTM_MAX_PAGES
+                    )
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("StreamShield", "YouTube Music home, more", e)
+                _ytmHome.update { it.copy(loadingMore = false, hasMore = false) }
+            }
+        }
+    }
+
+    fun openYtmItem(item: YtmItem) = openLink(YouTubeMusicHome.urlFor(item, MUSIC_HOME_URL))
+
+    fun musicLoadMore() {
+        viewModelScope.launch(Dispatchers.IO) { musicForYou.extend() }
+    }
+
+    /** Songs of the music "For you" that were on screen (they count as shown in the next list). */
+    fun musicSeen(videoIds: Collection<String>) = musicForYou.markSeen(videoIds)
+
+    fun musicNotInterested(song: MusicSong) {
+        viewModelScope.launch(Dispatchers.IO) {
+            library.setFeedback(song.videoId, FeedbackType.NOT_INTERESTED, true)
+            musicForYou.remove(song.videoId)
+            showBanner("Got it: fewer songs like this")
+        }
+    }
+
+    /** YouTube Music's queue for a song, from the page (called on the WebView's bridge thread). */
+    fun onMusicQueue(json: String) {
+        val (seed, items) = MusicForYouRepository.parseQueue(json) ?: return
+        musicForYou.addQueue(seed, items)
+    }
+
+    // ---------------------------------------------------------------------------------------
     // YouTube's Like / Dislike buttons on a video page (kept in the app; no Google account)
     // ---------------------------------------------------------------------------------------
 
@@ -1325,7 +1537,10 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             } else {
                 if (liked) library.toggleBuiltIn(BuiltInPlaylist.LIKED, videoId, true)
                 library.setFeedback(videoId, FeedbackType.DISLIKED, !disliked)
-                if (!disliked) forYou.remove(videoId)
+                if (!disliked) {
+                    forYou.remove(videoId)
+                    musicForYou.remove(videoId)
+                }
                 showBanner(if (!disliked) "Disliked: fewer videos like this" else "Dislike removed")
             }
         }

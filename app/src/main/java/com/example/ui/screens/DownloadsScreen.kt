@@ -30,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -155,7 +156,10 @@ private fun OfflineRow(
     onRetry: (OfflineItemEntity) -> Unit
 ) {
     val context = LocalContext.current
-    val thumb = OfflineStorage.thumbnailFile(context, item.videoId)
+    // File checks off every recomposition (the list updates often while a download runs).
+    val savedThumb = remember(item.videoId, item.isDone) {
+        OfflineStorage.thumbnailFile(context, item.videoId).takeIf { it.exists() }
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -172,7 +176,7 @@ private fun OfflineRow(
                 .background(MaterialTheme.colorScheme.surfaceVariant)
         ) {
             AsyncImage(
-                model = if (thumb.exists()) thumb else thumbnailUrl(item.videoId),
+                model = savedThumb ?: thumbnailUrl(item.videoId),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()

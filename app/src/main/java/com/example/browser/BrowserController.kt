@@ -26,6 +26,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import com.example.BuildConfig
 import com.example.data.WebVideoState
 import com.example.data.isYouTubeBrowsePage
 import com.example.data.isYouTubeVideoPage
@@ -133,8 +134,6 @@ class BrowserController(
     /** URL of the previous page of the current visit, or null. */
     fun previousUrlInSession(): String? = if (canGoBackInSession()) previousUrl() else null
 
-    fun reload() = webView.reload()
-
     /** YouTube Music song to start again after a pull-to-refresh reload (id, position). */
     private var resumeAfterReload: Pair<String, Int>? = null
     /** After the fallback (opening the song's page): seek there once it loads. */
@@ -155,6 +154,22 @@ class BrowserController(
         webView.reload()
     }
 
+    /**
+     * Opens a YouTube Music page from the app (a search). YouTube Music stops playing when its
+     * page is replaced, so a song that was playing is started again from the same point, as
+     * after a pull-to-refresh.
+     */
+    fun loadKeepingMusic(url: String) {
+        if (destroyed) return
+        val video = viewModel.videoState.value
+        resumeAfterReload = if (video.isMusicPage && video.isPlaying && video.videoId.isNotBlank()) {
+            video.videoId to video.positionSec
+        } else {
+            null
+        }
+        load(url)
+    }
+
     private fun handleResumeResult(ok: Boolean, videoId: String, position: Int) {
         if (ok || destroyed) return
         // The player API did not take it: open the song's page and seek there.
@@ -162,12 +177,10 @@ class BrowserController(
         load("$MUSIC_HOME_URL/watch?v=$videoId")
     }
 
-    private var lastResume: Pair<String, Int>? = null
-
-    fun canGoBack(): Boolean = webView.canGoBack()
+    @Volatile private var lastResume: Pair<String, Int>? = null
 
     /** URL of the previous history entry, or null (used to keep Back inside YouTube Music). */
-    fun previousUrl(): String? {
+    private fun previousUrl(): String? {
         val list = webView.copyBackForwardList()
         val index = list.currentIndex - 1
         return if (index >= 0) list.getItemAtIndex(index)?.url else null
@@ -175,10 +188,6 @@ class BrowserController(
 
     fun goBack() {
         if (webView.canGoBack()) webView.goBack()
-    }
-
-    fun goForward() {
-        if (webView.canGoForward()) webView.goForward()
     }
 
     fun play() = runPageCommand("play()")
@@ -191,8 +200,6 @@ class BrowserController(
     fun next() = runPageCommand("next()")
 
     fun previous() = runPageCommand("previous()")
-
-    val isFullscreen: Boolean get() = fullscreenView != null
 
     fun exitFullscreen() {
         if (fullscreenView == null) return
@@ -223,6 +230,8 @@ class BrowserController(
     // -------------------------------------------------------------------------------------------
 
     private fun configureWebView() {
+        // Debug builds: let chrome://inspect / adb + CDP attach to the YouTube page (testing).
+        if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
         webView.setBackgroundColor(Color.BLACK)
         webView.layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -363,7 +372,7 @@ class BrowserController(
             mainHandler.post { if (!destroyed && webView.canGoBack()) webView.goBack() }
             return
         }
-        viewModel.onPageChanged(url, view.title, view.canGoBack(), view.canGoForward(), loading)
+        viewModel.onPageChanged(url, loading)
     }
 
     private inner class PageBridge {
@@ -433,6 +442,12 @@ class BrowserController(
         /** "like", "dislike" or "" for the page's Like buttons. */
         @JavascriptInterface
         fun likeState(videoId: String?): String = viewModel.pageLikeState(videoId.orEmpty())
+
+        /** YouTube Music's queue for a song (for the Music tab's For you); parsed on this thread. */
+        @JavascriptInterface
+        fun onMusicQueue(json: String?) {
+            viewModel.onMusicQueue(json ?: return)
+        }
 
         @JavascriptInterface
         fun onResumeResult(result: String?) {
@@ -643,6 +658,7 @@ class BrowserController(
                     adsPruned = o.optInt("pruned"),
                     pipBlockedPauses = o.optInt("pipBlocked"),
                     pipSystemPauses = o.optInt("pipSystem"),
+                    pipStalls = o.optInt("pipStalls"),
                     channelId = o.optString("channelId"),
                     lengthSec = o.optInt("lengthSec"),
                     viewCount = o.optLong("views"),

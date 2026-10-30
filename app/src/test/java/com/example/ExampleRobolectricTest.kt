@@ -98,7 +98,9 @@ class ExampleRobolectricTest {
     @Test
     fun `page config json carries live preferences`() {
         val prefs = ShieldPreferencesState(adBlockEnabled = false, backgroundPlayEnabled = true, playbackSpeed = 1.5f)
-        val json = JSONObject(AdBlockShieldEngine.configJson(prefs, inPip = true))
+        val json = JSONObject(AdBlockShieldEngine.configJson(prefs, inPip = true, appVisible = false))
+        assertFalse(json.getBoolean("appVisible"))
+        assertTrue(json.getBoolean("autoplay"))
         assertFalse(json.getBoolean("adBlock"))
         assertTrue(json.getBoolean("bgPlay"))
         assertTrue(json.getBoolean("pip"))

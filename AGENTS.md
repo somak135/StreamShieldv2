@@ -17,6 +17,12 @@ first for the component map; this file covers commands, conventions and pitfalls
   WorkManager; downloads play in Media3 ExoPlayer (`offline/`).
 - Personal-use app: favour robustness and low battery and CPU use over feature breadth.
 
+## Local environment
+
+If you are running in the Docker dev container (`Dockerfile`) or another environment with
+internet access and a device/emulator, follow [docs/LOCAL_TESTING.md](docs/LOCAL_TESTING.md):
+setup, inspecting the live YouTube page over CDP, and the test plan.
+
 ## Commands
 
 ```sh
@@ -26,9 +32,9 @@ NODE_PATH=$(npm root -g) node tools/shield-js-test/shield.test.mjs   # shield.js
 node --check app/src/main/assets/shield.js                          # quick syntax check
 ```
 
-- There is no `gradlew` script checked in. Generate it with `gradle wrapper` (Gradle 9.3.1) or use
-  Android Studio. GitHub Actions builds every push to `main` and publishes the APK as the `latest`
-  release (`.github/workflows/build-apk.yml`).
+- There is no `gradlew` script checked in. `tools/dev-setup.sh` generates it, plus the git-ignored
+  `debug.keystore` that debug builds are signed with, and `local.properties`; or use Android
+  Studio. Building, CI, releases and signing: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 - The build needs Google Maven (`dl.google.com`), Maven Central and JitPack. In sandboxes without
   them, run at least the shield.js tests; the pure-Kotlin rules (`download/SmartRule.kt`,
   `recommend/ForYouRule.kt`, `engine/RequestFilter.kt`) compile in a plain Kotlin/JVM project
@@ -71,8 +77,8 @@ installs on a phone over USB.
   (`fallbackToDestructiveMigration` would wipe the library). New columns need a default in both the
   entity (`@ColumnInfo(defaultValue = …)`) and the `ALTER TABLE`. Add the migration to the
   migration test in `LibraryTest`.
-- **Reviewed rules.** `SmartRule` and `ForYouRule` implement rules the owner reviewed; their KDoc
-  is the specification. Change them only with the owner's agreement, and keep their tests in step.
+- **Reviewed rules.** `SmartRule`, `ForYouRule` and `MusicForYouRule` implement rules the owner
+  reviewed; their KDoc is the specification. Change them only with the owner's agreement, and keep their tests in step.
 - **Gradle.** Keep the `signingConfigs` blocks in `app/build.gradle.kts` unchanged; AI Studio
   needs them. Unused dependencies are commented out rather than deleted. Java 17 and core library
   desugaring are required by NewPipe Extractor (it contains records and uses `java.time`).
@@ -105,7 +111,11 @@ installs on a phone over USB.
   calls the page's next track and opens the next song's page only if that did not work. The
   ViewModel keeps the notification service "playing" (foreground + wake lock) for up to 30 s
   between the two videos; reporting "paused" there let Android suspend the app and stopped the
-  service from returning to the foreground. Settings → Diagnostics shows how the last autoplay
+  service from returning to the foreground. `holdThroughAutoplayGap()` must run on every state
+  report (it also ends the gap when the next video plays); a skipped call left the gap stuck and
+  broke every change after the first. Without the foreground service the app also loses network
+  in Doze, which the emulator (plugged in) does not show: test with
+  `adb shell dumpsys battery unplug` and `adb shell dumpsys deviceidle force-idle`. Settings → Diagnostics shows how the last autoplay
   went and how long the gap was.
 - **Muted autoplay.** YouTube starts a video muted when its page was opened without a tap (the
   app's own loads, background autoplay). `shield.js` unmutes on `playing`/`volumechange` through
@@ -122,14 +132,29 @@ installs on a phone over USB.
   `shield.js` refuses page `pause()` calls in PiP unless the user asked (`userPaused`), and resumes
   through the player API (`playVideo()`). Because that refusal would also swallow the user's own
   taps if the page wrongly thought it was in PiP, the page echoes its PiP flag (`cfgPip`) and the
-  app re-sends its config when they differ. The PiP stylesheet is the original app's; change it
-  only with on-device testing.
+  app re-sends its config when they differ. The controller also calls `webView.onResume()` /
+  `resumeTimers()` on entering PiP. Settings → Diagnostics counts refused page pauses, browser
+  pauses and stalls in PiP. The PiP stylesheet is the original app's; change it only with
+  on-device testing.
+- **Refused pauses leave YouTube "paused".** After refusing a page pause in PiP, call
+  `player.playVideo()` (`resyncPlayer`): a player that believes it is paused stops downloading,
+  which live streams (few seconds of buffer) hit within seconds.
+- **m.youtube.com playlists.** The mobile player does not know the playlist (`getPlaylist()` is
+  `[]`), so `player.nextVideo()` leaves a mix for an unrelated suggestion. The queue is in
+  `singleColumnWatchNextResults.playlist.playlist` (no `nextVideo` key), and its `contents` can be a
+  window of the playlist: find the current video by id, not by `currentIndex`.
 - **Play/pause taps.** A user reported YouTube's on-video play/pause not reacting. The page
   script now applies a tap the page missed and counts it in Settings → Diagnostics with the
   element that was on top. A dialog hidden by hand must take its backdrop with it.
 - **Slow video starts.** Settings → Diagnostics shows when the video data loaded and when playback
   started, time spent in the ad state and recently blocked requests. Ask for those numbers before
   changing ad-blocking rules.
+  Known cause (2026-10-24): when YouTube scheduled a pre-roll (`adSlots` with
+  `playerBytesAdLayoutRenderer`) and the shield strips it, the SABR media server answers the first
+  `videoplayback` request with a 4000 ms backoff (UMP part 35) and no media, so playback starts
+  ~5 s after the tap. The server enforces it: removing the backoff from the response makes the
+  player retry and wait longer, and letting the ad play while fast-forwarding takes 13–22 s.
+  Videos without a scheduled pre-roll start in ~1 s. Measure with `tools/device-probe`.
 - **Layout after PiP/fullscreen.** YouTube sizes its player in JavaScript. After PiP or fullscreen
   transitions, call `nudgeLayout()` or the player stays cropped.
 - **Two pages, one player.** Only the player page plays. The browse page refuses playback and
@@ -143,7 +168,18 @@ installs on a phone over USB.
 - **For you budget.** Each refresh fetches at most 6 related lists, 2 related-of-related lists,
   1 search and the watched channels' RSS feeds (6 h); loading more fetches 4 + 2. Every NewPipe
   stream request is a full YouTube page load, so keep these small. Lists are cached a day and
-  used for a week (`for_you.json`).
+  used for a week (`for_you.json`). The Music tab's For you fetches at most 4 related lists per
+  refresh (3 more when loading more) and the followed artists' RSS feeds (6 h); YouTube Music's
+  queues come from the page for free (`onMusicQueue`).
+- **YouTube Music's home shelves** (`recommend/YouTubeMusicHome.kt`) are InnerTube responses
+  read by hand (shapes from the live site, October 2026). Continuations need the first
+  response's `visitorData` as `X-Goog-Visitor-Id`, or YouTube returns an empty page. Loaded at
+  most once an hour (and on pull-down), up to 6 pages.
+- **"Use the app" prompts.** YouTube Music shows them after a page load (pull-to-refresh, coming
+  back to the app, autoplay opening the next song's page). `dismissAppUpsell` finds them by the
+  app button's label or by a small dialog's own text about the app and presses its own Not now /
+  Close (else hides it). While the app is hidden it runs only when a prompt could hold playback
+  (`playbackMayBeHeld`), to keep the background heartbeat cheap.
 - **Like / Dislike buttons** follow the Subscribe pattern (capture-phase stop, sync state call).
   Comments have Like buttons too ("Like this comment …"); they must stay YouTube's.
 - **Downloads.** Stream URLs expire and some need the client's user agent; `RangeFetcher` and

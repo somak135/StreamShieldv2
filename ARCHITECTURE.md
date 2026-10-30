@@ -50,8 +50,8 @@ downloads use NewPipe Extractor (JitPack) to read YouTube's related lists and st
 ## Code map
 
 All Kotlin lives under `app/src/main/java/com/example/` (the namespace is `com.example`; the
-application id is `com.aistudio.streamshield.vytkzp`, changed from the original StreamShield's
-`…vqxkpl` so both can be installed side by side).
+application id is `com.aistudio.streamshield.vqxkpl`; the fork somak135/StreamShieldv2 builds as
+`com.aistudio.streamshield.vytkzp`, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#application-id)).
 
 ### `MainActivity.kt`
 The only activity. It creates the two page controllers and the offline player, hosts the Compose
@@ -91,6 +91,8 @@ is not recreated in those cases, so the WebViews keep playing.
 - **Config push:** observes preferences, PiP state, app visibility and the pull-down mode and calls
   `window.__streamShield.setConfig(...)` when they change. The page echoes its PiP flag in each
   state report; if it differs from the app's, the config is sent again.
+- **Start:** the player page loads nothing until the first video or YouTube Music. (On YouTube's
+  home page, which nobody sees there, YouTube played a feed item as a background preview.)
 - **Visits:** every page the app opens with `load()` starts a *visit*; Back walks the WebView
   history only inside it. `refreshPage()` reloads (pull-to-refresh) and restarts a YouTube Music
   song that was playing.
@@ -137,14 +139,23 @@ The page script. It is idempotent: it returns early if `window.__streamShield` e
      app is on screen (`config.appVisible`), every 5 s in the background (playback state only,
      no page tidying), and every 10 s on a hidden browse page (which then does nothing);
    - a PiP keep-playing guard: in PiP, any pause the user did not request through the app is
-     undone, using the `pause` event plus a 500 ms check that runs only in PiP;
+     undone, using the `pause` event plus a 500 ms check that runs only in PiP; after a refused
+     page pause, `resyncPlayer()` calls `playVideo()` so the player keeps downloading (live
+     streams), and `waiting` events in PiP are counted as stalls;
+   - autoplay while hidden: on `ended` in PiP or with the app hidden, open the next video of the
+     mix/playlist (or the suggestion, if Autoplay is on) captured from watch-next responses
+     (`nextByVideo`); on YouTube Music, the page's next track first;
+   - muted starts: a video YouTube started muted is unmuted through `player.unMute()` (not during
+     ads, not after the user muted on the page, at most 5 times per video), only on a watch page
+     or YouTube Music, so feed previews elsewhere stay muted;
    - start-up diagnostics (time to first frame, time in ad state, ads removed, 17 s timers
      shortened), sent with the state report, shown in Settings → Diagnostics and, unless turned
      off, as a short note when a video starts. For in-page navigation, timing starts at the user's
      last tap (the URL only changes, via `history.pushState`, once the data has arrived).
 5. **Native → page API:** `window.__streamShield.setConfig`, `setSponsorSegments`, `play`, `pause`,
-   `togglePlay`, `exitFullscreen`, `nudgeLayout`, `refreshSubscribeButtons`, `resumeMusic`,
-   `seekWhenReady`.
+   `togglePlay`, `next`, `previous`, `exitFullscreen`, `nudgeLayout`, `refreshSubscribeButtons`,
+   `refreshLikeButtons`, `resumeMusic`, `seekWhenReady`. `getConfig`, `reportState` and `internals` are for tests and
+   CDP debugging.
 6. **Play/pause taps:** a tap on a visible play/pause control in the player that has not changed
    playback 400 ms later is applied by the app (`pauseVideo` / `resumeVideo`). Each fix is counted
    with the element that was on top at the tapped point (`tapFix`, `tapTop` in the state report;
@@ -163,8 +174,9 @@ The page script. It is idempotent: it returns early if `window.__streamShield` e
 9. **Like / Dislike buttons** (video and Shorts pages on m.youtube.com, not comments): taps are
    stopped the same way and sent as `onLikeTap {videoId, kind}`; the app keeps likes in Liked
    videos and dislikes as feedback (`DISLIKED`). Buttons show the state from `likeState(videoId)`
-   (`aria-pressed`, a tint); `refreshLikeButtons()` after a change.
-9. **Browse page fade:** while YouTube swaps pages in the browse page, `html.ss-nav` dims the body
+   (`aria-pressed`, a tint); `refreshLikeButtons()` after a change. The browse page never shows a
+   video page, so its bridge answers these calls with no-ops.
+10. **Browse page fade:** while YouTube swaps pages in the browse page, `html.ss-nav` dims the body
    briefly.
 
 Page → native calls go through `window.StreamShieldBridge`: `getConfig()` and `isSubscribed(json)`
@@ -192,7 +204,10 @@ Bridge methods run on a background thread; the controllers post to the main thre
   opening-video placeholder, For you, and diagnostics. It records history and the listening log
   from `onVideoState`, fetches SponsorBlock segments, keeps the background service in sync, and
   batches counters (flushed to DataStore at most every 5 s and on `onStop`).
-- `screens/`: `HomeScreen` (search, Continue watching, For you, Recently watched), `MusicScreen`,
+- `screens/`: `HomeScreen` (the YouTube app's layout: top bar with search, tabs Home · Subs ·
+  Recently uploaded · New to you, full-width cards), `MusicScreen` (the YouTube Music app's
+  layout: mood chips, Speed dial, Quick picks, Mixed for you, Forgotten favorites, New releases,
+  then YouTube Music's own shelves),
   `SubscriptionsScreen` (channels with stars, feed), `LibraryScreen` (history, playlists),
   `DownloadsScreen`, `BrowserScreen` (player page: the WebView, the opening-video placeholder, the
   pull indicator and the player control bar), `BrowsePageScreen`, `OfflinePlayerScreen` and
@@ -227,7 +242,7 @@ Bridge methods run on a background thread; the controllers post to the main thre
   version without a migration wipes the library**.
 - `LibraryEntities.kt`, `LibraryDao.kt`, `LibraryRepository.kt`: videos, watch entries (resume
   position, watched fraction), subscriptions, feed items, playlists (Watch later and Liked are
-  built in), feedback ("Not interested") and searches.
+  built in), feedback ("Not interested", hidden channels, dislikes) and searches.
 - `OfflineEntities.kt`: downloads (`offline_items`), the listening log (`play_events`) and smart
   downloads the rule removed (`smart_removed`).
 - `SubscriptionFeed.kt`: the RSS client and parser (also marks Shorts), the refresher, and the
@@ -250,6 +265,9 @@ Bridge methods run on a background thread; the controllers post to the main thre
 - `ForYouRule.kt` (the reviewed "For you" rule, pure Kotlin) and `ForYouRepository.kt` (reads
   the library, fetches related / related-of-related / search lists and watched channels' RSS
   feeds within a budget, caches them, tracks what was shown, saves it all in `for_you.json`).
+- `MusicForYouRule.kt` (the Music tab's agreed "For you" rule for songs, pure Kotlin) and
+  `MusicForYouRepository.kt` (keeps YouTube Music's queues reported by the page, fetches a few
+  related lists and followed artists' RSS feeds, saves it all in `music_for_you.json`).
 
 ### `offline/`
 - `OfflinePlayerController.kt`: ExoPlayer for downloads; reports its state in the same shape as the
@@ -294,17 +312,44 @@ above the tabs (`zIndex`) and slides it up from the bottom (`playerSlide`, an `A
 minimizing slides it down and puts it back underneath. Back on a video page uses
 `PredictiveBackHandler` (the player follows the gesture on Android 14+; the manifest enables
 `enableOnBackInvokedCallback`), and the page script's pull-down drives the same slide. While a
-video loads, `pendingVideo` (thumbnail and title) covers the page until it plays (at most 8 s, or
-2.5 s after the page loaded). The tab area is an `AnimatedContent` keyed by `TabScreen`: deeper
+video loads, `pendingVideo` (thumbnail and title) covers the page until it plays, 1.2 s after the
+new video's page first reports its state, 2.5 s after the page loaded, or 5 s at most, whichever
+comes first. The tab area is an `AnimatedContent` keyed by `TabScreen`: deeper
 screens (browse page, Library sub-screens) slide in from the right, other tabs cross-fade.
 
 **Pull-to-refresh.** Native screens use `PullToRefreshContainer` (nested scrolling, no
 experimental Material API): Home refreshes subscriptions and rebuilds "For you", Subscriptions
-refreshes the feeds, Library / Downloads / Music only show the gesture. Web pages report the pull
+refreshes the feeds, the music home rebuilds its "For you", Library / Downloads only show the
+gesture. Web pages report the pull
 from the page script; `StreamShieldViewModel.onWebPullEnd` reloads the page (`reloadRequests`) or
 minimizes the player. Reloading YouTube Music while a song plays stops it, so
 `BrowserController.refreshPage` starts it again afterwards (`resumeMusic` through the player's
 `loadVideoById`; if that does not take, the song's page is opened and `seekWhenReady` seeks).
+A search from the music home opens YouTube Music's search page the same way
+(`BrowserController.loadKeepingMusic`).
+
+**Music tab.** It opens on the app's music home (`MusicScreen`); `musicPageShown` says whether
+YouTube Music's page (in the player page) fills the tab instead. A song, a search or the
+"YouTube Music" button shows the page; Back at the first page of that visit, or tapping the Music
+tab, returns to the music home, with the song in the mini-player (tapping it shows the page
+again). YouTube Music is loaded only from there, so opening the tab does not replace a paused
+video.
+
+**For you (Music).** `recommend/MusicForYouRule` (agreed rule, KDoc; unit-tested) and
+`MusicForYouRepository`, built like Home's. Seeds are songs played in the app (play count
+counts). Candidates: YouTube Music's queue after a seed song, reported by the page script
+(`onMusicQueue`, from the watch-next response: radio, album or playlist; kept 30 days, no extra
+requests), YouTube's related lists (up to 4 per refresh, NewPipe) and RSS uploads of the 5 artists
+played most. Artists are matched by name ("- Topic" removed). Songs played in the last 14 days
+are left out (they are in Speed dial).
+
+**Music home shelves.** `recommend/MusicShelves` (pure Kotlin, unit-tested) makes Speed dial,
+Mixed for you (radios: `watch?v=X&list=RDAMVMX`) and Forgotten favorites from the history.
+`recommend/YouTubeMusicHome` loads YouTube Music's own signed-out home through InnerTube
+(`/youtubei/v1/browse`, client WEB_REMIX, the version NewPipe Extractor determines, the WebView's
+YouTube Music cookies): the first page has the mood chips and a few shelves; further shelves need
+the `visitorData` of the first response as `X-Goog-Visitor-Id` (without it the continuation
+returns an empty page). A chip is the same request with the chip's `params`.
 
 **For you (Home).** `recommend/ForYouRule` (pure Kotlin, unit-tested; its KDoc is the reviewed
 rule) and `ForYouRepository`. Candidates: new uploads from subscriptions (RSS), YouTube's related
@@ -364,9 +409,11 @@ button, calls `onHideCustomView`.
   config JSON, URL/format helpers, the user-agent rewrite and PiP aspect-ratio clamping.
 - `app/src/test/.../data/LibraryTest.kt` covers the database migrations, library round trips, the
   RSS and Takeout parsers and page classification; `download/SmartRuleTest.kt` and
-  `recommend/ForYouRuleTest.kt` cover the two reviewed rules.
+  `recommend/ForYouRuleTest.kt` cover the two reviewed rules, `recommend/MusicForYouRuleTest.kt`
+  the music rule.
 - `tools/shield-js-test/shield.test.mjs` runs `shield.js` in headless Chromium against mock
   YouTube pages. It covers pruning, the ad fallback, background-play events, speed, SponsorBlock,
-  PiP layout, page routing, the heartbeat, play/pause tap fixes, Subscribe buttons, pull-down
+  PiP layout, page routing, the heartbeat, play/pause tap fixes, Subscribe and Like / Dislike
+  buttons, feed previews left muted, pull-down
   gestures, the browse-page fade, resuming after a reload and parse overhead. It cannot catch
   YouTube changing its markup or JSON shape, so verify on a device after YouTube updates.

@@ -73,6 +73,8 @@ fun LibraryScreen(
     route: LibraryRoute,
     history: List<WatchedVideo>,
     playlists: List<PlaylistSummary>,
+    /** Started but not finished videos (moved here from Home, as in the YouTube app's You tab). */
+    continueWatching: List<WatchedVideo> = emptyList(),
     historyPaused: Boolean,
     playlistItems: (Long) -> Flow<List<PlaylistVideo>>,
     onNavigate: (LibraryRoute) -> Unit,
@@ -93,6 +95,7 @@ fun LibraryScreen(
     when (route) {
         LibraryRoute.Root -> LibraryRoot(
             history = history,
+            continueWatching = continueWatching,
             playlists = playlists,
             downloadsSummary = downloadsSummary,
             onNavigate = onNavigate,
@@ -136,6 +139,7 @@ fun LibraryScreen(
 @Composable
 private fun LibraryRoot(
     history: List<WatchedVideo>,
+    continueWatching: List<WatchedVideo>,
     playlists: List<PlaylistSummary>,
     downloadsSummary: String,
     onNavigate: (LibraryRoute) -> Unit,
@@ -175,6 +179,28 @@ private fun LibraryRoot(
                 Column(modifier = Modifier.weight(1f)) {
                     Text("Downloads", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     Text(downloadsSummary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+
+        if (continueWatching.isNotEmpty()) {
+            item { SectionHeader("Continue watching") }
+            item {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(continueWatching, key = { "continue_" + it.videoId }) { video ->
+                        VideoCard(
+                            videoId = video.videoId,
+                            title = video.title,
+                            subtitle = video.channelName,
+                            durationSec = video.durationSec,
+                            progress = video.watchedFraction,
+                            width = 180.dp,
+                            onClick = { onOpenVideo(video.videoId, video.positionSec) }
+                        )
+                    }
                 }
             }
         }

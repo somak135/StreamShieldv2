@@ -132,6 +132,12 @@ class OfflineDownloader(
             } else {
                 OfflineStorage.savePublic(context, result, title, container, audioOnly)
             }
+            if (dao.getItem(itemId) == null) {
+                // Deleted while it was being fetched: do not leave a file nothing refers to.
+                OfflineStorage.delete(context, location)
+                cleanTemp(tempBase)
+                throw CancellationException("Download deleted")
+            }
             OfflineStorage.saveThumbnail(context, item.videoId)
             dao.markDone(
                 id = itemId,

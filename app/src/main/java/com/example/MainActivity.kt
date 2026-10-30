@@ -119,6 +119,7 @@ import com.example.ui.screens.BrowserScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.LibraryScreen
 import com.example.ui.screens.MusicScreen
+import com.example.ui.screens.PipStats
 import com.example.ui.screens.SubscriptionsScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.theme.EmeraldSafe
@@ -171,6 +172,7 @@ class MainActivity : ComponentActivity() {
         requestNotificationPermissionOnce()
         // Native screens ask for pages through the view model; the WebView lives here.
         lifecycleScope.launch { viewModel.openUrlRequests.collect { url -> browser.load(url) } }
+        lifecycleScope.launch { viewModel.musicPageRequests.collect { url -> browser.loadKeepingMusic(url) } }
         lifecycleScope.launch { viewModel.browseRequests.collect { url -> browsePage.load(url) } }
         // Pull-to-refresh on a web page.
         lifecycleScope.launch {
@@ -473,6 +475,10 @@ fun StreamShieldApp(
     val downloadSheet by viewModel.downloadSheet.collectAsStateWithLifecycle()
     val forYouState by viewModel.forYouState.collectAsStateWithLifecycle()
     val homeRefreshing by viewModel.homeRefreshing.collectAsStateWithLifecycle()
+    val musicForYouState by viewModel.musicForYouState.collectAsStateWithLifecycle()
+    val musicRefreshing by viewModel.musicRefreshing.collectAsStateWithLifecycle()
+    val musicPageShown by viewModel.musicPageShown.collectAsStateWithLifecycle()
+    val ytmHome by viewModel.ytmHome.collectAsStateWithLifecycle()
     val webPull by viewModel.webPull.collectAsStateWithLifecycle()
     val webRefreshing by viewModel.webRefreshing.collectAsStateWithLifecycle()
     val pendingVideo by viewModel.pendingVideo.collectAsStateWithLifecycle()
@@ -560,8 +566,9 @@ fun StreamShieldApp(
                 .fillMaxSize()
                 .then(if (isInPipMode) Modifier else Modifier.windowInsetsPadding(WindowInsets.safeDrawing))
         ) {
-            // Music tab: the YouTube Music page itself, with the app's bottom navigation under it.
-            val musicMode = currentTab == AppTab.MUSIC && !playerExpanded &&
+            // Music tab: the YouTube Music page itself, with the app's bottom navigation under it
+            // (otherwise the tab shows the app's music home).
+            val musicMode = currentTab == AppTab.MUSIC && !playerExpanded && musicPageShown &&
                 browserState.url.startsWith(MUSIC_HOME_URL)
             val tabsUnderPage = musicMode || (playerExpanded && !videoPage)
             val musicPlaying = musicMode && videoState.videoId.isNotBlank() && videoState.isMusicPage
@@ -605,9 +612,9 @@ fun StreamShieldApp(
                 } else null,
                 onBack = {
                     if (musicMode) {
-                        // Stay inside YouTube Music; leaving it goes back to Home.
+                        // Stay inside YouTube Music; leaving it goes back to the music home.
                         if (browser.previousUrlInSession()?.startsWith(MUSIC_HOME_URL) == true) browser.goBack()
-                        else viewModel.selectTab(AppTab.HOME)
+                        else viewModel.showMusicHome()
                     } else {
                         viewModel.collapsePlayer()
                     }
@@ -654,7 +661,7 @@ fun StreamShieldApp(
                                 onExpand = {
                                     when {
                                         offlineActive -> viewModel.expandOffline()
-                                        videoState.isMusicPage -> viewModel.selectTab(AppTab.MUSIC)
+                                        videoState.isMusicPage -> viewModel.showMusicPage()
                                         else -> viewModel.expandPlayer()
                                     }
                                 },
@@ -728,19 +735,23 @@ fun StreamShieldApp(
                                     modifier = Modifier.fillMaxSize()
                                 ) {
                                     HomeScreen(
-                                        continueWatching = continueWatching,
                                         forYou = forYouState.items,
                                         forYouRefreshing = forYouState.refreshing,
                                         forYouNote = forYouState.note,
                                         forYouGeneration = forYouState.generation,
                                         forYouExtending = forYouState.extending,
                                         forYouEnd = forYouState.endReached,
+                                        feed = feed,
+                                        feedRefreshing = feedRefresh.running,
+                                        hasSubscriptions = subscriptions.isNotEmpty(),
+                                        subscribedChannels = remember(subscriptions) { subscriptions.map { it.channelId }.toSet() },
                                         history = history,
                                         recentSearches = recentSearches,
                                         onSearch = viewModel::search,
                                         onDeleteSearch = viewModel::deleteSearch,
                                         onOpenVideo = viewModel::openVideo,
-                                        onSeeHistory = { viewModel.openLibraryRoute(LibraryRoute.History) },
+                                        onOpenChannel = { id -> viewModel.openBrowse("$HOME_URL/channel/$id") },
+                                        onOpenSubscriptions = { viewModel.selectTab(AppTab.SUBSCRIPTIONS) },
                                         onDownload = viewModel::requestDownload,
                                         onNotInterested = viewModel::forYouNotInterested,
                                         onForYouOpened = viewModel::forYouOpened,
@@ -749,14 +760,30 @@ fun StreamShieldApp(
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 }
-                                AppTab.MUSIC -> LocalRefresh(modifier = Modifier.fillMaxSize()) {
+                                AppTab.MUSIC -> PullToRefreshContainer(
+                                    refreshing = musicRefreshing,
+                                    onRefresh = viewModel::refreshMusicHome,
+                                    modifier = Modifier.fillMaxSize()
+                                ) {
                                     MusicScreen(
                                         history = history,
+                                        forYou = musicForYouState.items,
+                                        forYouRefreshing = musicForYouState.refreshing,
+                                        forYouNote = musicForYouState.note,
+                                        forYouGeneration = musicForYouState.generation,
+                                        ytm = ytmHome,
                                         videoPlaying = videoState.isPlaying && !videoState.isMusicPage,
-                                        playingTitle = videoState.title,
+                                        onSearch = viewModel::searchMusic,
                                         onOpenYouTubeMusic = viewModel::openYouTubeMusic,
-                                        onOpenTrack = { id -> viewModel.openLink("$MUSIC_HOME_URL/watch?v=$id") },
+                                        onPlaySong = viewModel::playSong,
+                                        onPlayRadio = viewModel::playRadio,
+                                        onOpenArtist = viewModel::openMusicArtist,
+                                        onOpenYtmItem = viewModel::openYtmItem,
+                                        onSelectChip = viewModel::selectYtmChip,
+                                        onLoadMoreYtm = viewModel::loadMoreYtm,
                                         onDownload = viewModel::requestDownload,
+                                        onNotInterested = viewModel::musicNotInterested,
+                                        onSeen = viewModel::musicSeen,
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 }
@@ -785,6 +812,7 @@ fun StreamShieldApp(
                                         route = shown.route ?: LibraryRoute.Root,
                                         history = history,
                                         playlists = playlists,
+                                        continueWatching = continueWatching,
                                         historyPaused = preferences.historyPaused,
                                         playlistItems = viewModel.playlistItemsFlow,
                                         onNavigate = viewModel::openLibraryRoute,
@@ -832,7 +860,7 @@ fun StreamShieldApp(
                     preferences = preferences,
                     blockCounts = blockCounts,
                     lastStart = lastStart,
-                    pipPauses = videoState.pipBlockedPauses to videoState.pipSystemPauses,
+                    pipStats = PipStats(videoState.pipBlockedPauses, videoState.pipSystemPauses, videoState.pipStalls),
                     tapFixes = tapFixes.count to tapFixes.lastTop,
                     autoplayDiagnostics = autoplayDiagnostics,
                     recentBlocked = recentBlocked,

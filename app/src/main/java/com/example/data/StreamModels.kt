@@ -27,6 +27,8 @@ data class WebVideoState(
     /** In PiP: pause calls from the page that were refused, and pauses that came from the browser. */
     val pipBlockedPauses: Int = 0,
     val pipSystemPauses: Int = 0,
+    /** In PiP: times playback stalled waiting for data (live streams run dry when this grows). */
+    val pipStalls: Int = 0,
     /** From the player response's videoDetails (empty / 0 until it has been seen). */
     val channelId: String = "",
     val lengthSec: Int = 0,

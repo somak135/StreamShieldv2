@@ -4,7 +4,6 @@ import androidx.compose.ui.graphics.Color
 
 // StreamShield Brand Accents (Brave-inspired Signal Coral & Cyber Cyan)
 val ShieldCoral = Color(0xFFFF5436)
-val ShieldCoralLight = Color(0xFFFF7A61)
 val ShieldCoralDark = Color(0xFFD9381E)
 
 val CyberCyan = Color(0xFF00E5FF)

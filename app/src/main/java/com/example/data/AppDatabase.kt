@@ -12,7 +12,6 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
-import kotlinx.coroutines.flow.Flow
 
 /** Table of the original app's (simulated) downloads; unused, kept so the schema stays the same. */
 @Entity(tableName = "downloads")
@@ -36,12 +35,7 @@ data class DownloadEntity(
     val sourceStreamUrl: String,
     val sourcePageUrl: String,
     val createdAt: Long = System.currentTimeMillis()
-) {
-    val progressFraction: Float
-        get() = if (totalBytes > 0L) {
-            (downloadedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
-        } else 0f
-}
+)
 
 @Entity(tableName = "bookmarks")
 data class BookmarkEntity(
@@ -63,17 +57,8 @@ data class WatchHistoryEntity(
 
 @Dao
 interface BookmarkDao {
-    @Query("SELECT * FROM bookmarks ORDER BY createdAt DESC")
-    fun observeAllBookmarks(): Flow<List<BookmarkEntity>>
-
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertBookmark(bookmark: BookmarkEntity)
-
-    @Query("DELETE FROM bookmarks WHERE id = :id")
-    suspend fun deleteBookmarkById(id: Long)
-
-    @Query("SELECT COUNT(*) FROM bookmarks")
-    suspend fun countBookmarks(): Int
 
     @Query("SELECT * FROM bookmarks ORDER BY createdAt ASC")
     suspend fun allBookmarks(): List<BookmarkEntity>
@@ -84,12 +69,6 @@ interface BookmarkDao {
 
 @Dao
 interface WatchHistoryDao {
-    @Query("SELECT * FROM watch_history ORDER BY visitedAt DESC LIMIT 50")
-    fun observeRecentHistory(): Flow<List<WatchHistoryEntity>>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsertHistory(entry: WatchHistoryEntity)
-
     @Query("DELETE FROM watch_history")
     suspend fun clearAllHistory()
 }
@@ -116,7 +95,7 @@ abstract class StreamShieldDatabase : RoomDatabase() {
 
         /**
          * Version 2 adds the local library tables. The SQL must match the entity classes exactly
-         * (Room validates the schema after migrating); `DatabaseMigrationTest` checks this.
+         * (Room validates the schema after migrating); `LibraryTest` checks this.
          * The old `watch_history` rows are copied into `videos` / `watch_entries`.
          */
         val MIGRATION_1_2 = object : Migration(1, 2) {

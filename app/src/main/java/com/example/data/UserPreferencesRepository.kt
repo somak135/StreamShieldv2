@@ -66,6 +66,8 @@ class UserPreferencesRepository(private val context: Context) {
         val REMEMBER_SPEED = booleanPreferencesKey("remember_speed")
         val HISTORY_PAUSED = booleanPreferencesKey("history_paused")
         val AUTOPLAY = booleanPreferencesKey("autoplay")
+        /** The original app's "Autoplay next video" (PiP/background only); used as the default of [AUTOPLAY] until that is set. */
+        val LEGACY_AUTO_ADVANCE = booleanPreferencesKey("auto_advance")
         val AUTO_BACKUP = booleanPreferencesKey("auto_backup")
         val AUTO_BACKUP_FOLDER = stringPreferencesKey("auto_backup_folder")
         val LAST_AUTO_BACKUP = longPreferencesKey("last_auto_backup")
@@ -92,7 +94,7 @@ class UserPreferencesRepository(private val context: Context) {
             playbackSpeed = (prefs[Keys.PLAYBACK_SPEED] ?: 1.0f).coerceIn(0.25f, 3.0f),
             rememberSpeedAcrossVideos = prefs[Keys.REMEMBER_SPEED] ?: true,
             historyPaused = prefs[Keys.HISTORY_PAUSED] ?: false,
-            autoplayEnabled = prefs[Keys.AUTOPLAY] ?: true,
+            autoplayEnabled = prefs[Keys.AUTOPLAY] ?: prefs[Keys.LEGACY_AUTO_ADVANCE] ?: true,
             autoBackupEnabled = prefs[Keys.AUTO_BACKUP] ?: false,
             autoBackupFolder = prefs[Keys.AUTO_BACKUP_FOLDER] ?: "",
             lastAutoBackupAt = prefs[Keys.LAST_AUTO_BACKUP] ?: 0L,
@@ -168,6 +170,7 @@ class UserPreferencesRepository(private val context: Context) {
         .put("rememberSpeedAcrossVideos", p.rememberSpeedAcrossVideos)
         .put("historyPaused", p.historyPaused)
         .put("autoplayEnabled", p.autoplayEnabled)
+        .put("showStartTime", p.showStartTime)
         .put("smartSizeMb", p.smartSizeMb)
         .put("downloadVideoQuality", p.downloadVideoQuality)
         .put("downloadMusicQuality", p.downloadMusicQuality)
@@ -188,6 +191,7 @@ class UserPreferencesRepository(private val context: Context) {
             bool("rememberSpeedAcrossVideos", Keys.REMEMBER_SPEED)
             bool("historyPaused", Keys.HISTORY_PAUSED)
             bool("autoplayEnabled", Keys.AUTOPLAY)
+            bool("showStartTime", Keys.SHOW_START_TIME)
             fun int(name: String, key: Preferences.Key<Int>) {
                 if (json.has(name)) prefs[key] = json.optInt(name)
             }

@@ -20,13 +20,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.DarkMode
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -49,7 +48,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.filled.Backup
-import androidx.compose.material.icons.filled.SkipNext
 import com.example.data.BackupFolder
 import com.example.data.formatAgo
 import com.example.data.ShieldPreferencesState
@@ -70,7 +68,7 @@ fun SettingsScreen(
     preferences: ShieldPreferencesState,
     blockCounts: BlockCounts,
     lastStart: StartDiagnostics?,
-    pipPauses: Pair<Int, Int>,
+    pipStats: PipStats,
     recentBlocked: List<String>,
     onClose: () -> Unit,
     /** Play/pause taps the page missed and the app applied (this session), and what was on top. */
@@ -157,7 +155,7 @@ fun SettingsScreen(
                 item {
                     DiagnosticsCard(
                         lastStart = lastStart,
-                        pipPauses = pipPauses,
+                        pipStats = pipStats,
                         tapFixes = tapFixes,
                         autoplay = autoplayDiagnostics,
                         recentBlocked = recentBlocked,
@@ -415,11 +413,14 @@ private fun sizeLabel(mb: Int): String = when {
     else -> "$mb MB"
 }
 
+/** Playback interruptions seen in picture-in-picture (shown in Diagnostics). */
+data class PipStats(val refusedPauses: Int, val systemPauses: Int, val stalls: Int)
+
 /** What happened while the last video started: helps tell ad-related delays from other ones. */
 @Composable
 private fun DiagnosticsCard(
     lastStart: StartDiagnostics?,
-    pipPauses: Pair<Int, Int>,
+    pipStats: PipStats,
     tapFixes: Pair<Int, String>,
     autoplay: AutoplayDiagnostics,
     recentBlocked: List<String>,
@@ -466,9 +467,10 @@ private fun DiagnosticsCard(
             )
             DiagnosticLine("17 s player timers skipped", lastStart.timersBoosted.toString())
         }
-        if (pipPauses.first > 0 || pipPauses.second > 0) {
-            DiagnosticLine("PiP: page pauses refused", pipPauses.first.toString())
-            DiagnosticLine("PiP: system pauses", pipPauses.second.toString())
+        if (pipStats.refusedPauses > 0 || pipStats.systemPauses > 0 || pipStats.stalls > 0) {
+            DiagnosticLine("PiP: page pauses refused", pipStats.refusedPauses.toString())
+            DiagnosticLine("PiP: system pauses", pipStats.systemPauses.toString())
+            DiagnosticLine("PiP: stalls (waiting for data)", pipStats.stalls.toString())
         }
         if (tapFixes.first > 0) {
             DiagnosticLine("Play/pause taps the page missed (fixed)", tapFixes.first.toString())

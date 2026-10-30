@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.provider.DocumentsContract
+import androidx.room.withTransaction
 import kotlinx.coroutines.flow.first
 import org.json.JSONArray
 import org.json.JSONObject
@@ -27,7 +28,8 @@ enum class ImportMode { MERGE, REPLACE }
 
 /**
  * Exports / imports everything the app knows about the user as one JSON file, so a new phone (or
- * a reinstall) can pick up where the old one left off without any account.
+ * a reinstall) can pick up where the old one left off without any account. Downloads and the
+ * smart-download listening log stay on the device.
  *
  * Format 1:
  * ```
@@ -122,12 +124,17 @@ class BackupManager(
 
     suspend fun import(text: String, mode: ImportMode) {
         val root = parse(text)
+        root.optJSONObject("preferences")?.let { prefs.restoreFromBackup(it) }
+        // One transaction: an interrupted import leaves the library as it was, and is much faster.
+        db.withTransaction { importLibrary(root, mode) }
+    }
+
+    private suspend fun importLibrary(root: JSONObject, mode: ImportMode) {
         if (mode == ImportMode.REPLACE) {
             dao.clearLibrary()
             db.bookmarkDao().clearBookmarks()
         }
         library.ensureBuiltInPlaylists()
-        root.optJSONObject("preferences")?.let { prefs.restoreFromBackup(it) }
 
         // Subscriptions (existing ones are kept as they are).
         val subs = root.optJSONArray("subscriptions").objects().mapNotNull { o ->
@@ -236,10 +243,12 @@ class BackupManager(
             if (time in 1 until agg.first) agg.first = time
             if (time > agg.last) agg.last = time
         }
-        for ((id, a) in byId) {
-            library.rememberVideo(id, a.title, a.channelId, a.channel, 0, 0, a.music)
-            val incoming = WatchEntryEntity(id, 0, 0, TAKEOUT_FRACTION, a.first, a.last, a.count, a.music)
-            dao.upsertWatchEntry(mergeWatch(dao.getWatchEntry(id), incoming))
+        db.withTransaction {
+            for ((id, a) in byId) {
+                library.rememberVideo(id, a.title, a.channelId, a.channel, 0, 0, a.music)
+                val incoming = WatchEntryEntity(id, 0, 0, TAKEOUT_FRACTION, a.first, a.last, a.count, a.music)
+                dao.upsertWatchEntry(mergeWatch(dao.getWatchEntry(id), incoming))
+            }
         }
         return byId.size
     }

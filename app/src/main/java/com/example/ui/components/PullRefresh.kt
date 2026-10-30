@@ -108,7 +108,7 @@ fun PullToRefreshContainer(
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
                 // Scrolling back up while the circle is out: move the circle first.
-                if (source != NestedScrollSource.Drag || available.y >= 0f || pullPx <= 0f) return Offset.Zero
+                if (source != NestedScrollSource.UserInput || available.y >= 0f || pullPx <= 0f) return Offset.Zero
                 val used = maxOf(available.y, -pullPx)
                 pullPx += used
                 return Offset(0f, used)
@@ -116,7 +116,7 @@ fun PullToRefreshContainer(
 
             override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
                 // Dragging down at the top of the list: what the list could not use pulls.
-                if (source != NestedScrollSource.Drag || currentRefreshing || available.y <= 0f) return Offset.Zero
+                if (source != NestedScrollSource.UserInput || currentRefreshing || available.y <= 0f) return Offset.Zero
                 pullPx = (pullPx + available.y * PULL_DRAG_RATE).coerceAtMost(maxPx)
                 return Offset(0f, available.y)
             }

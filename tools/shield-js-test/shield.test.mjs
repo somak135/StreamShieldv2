@@ -139,6 +139,7 @@ function bridgeInit(config) {
       onPullEnd: function (j) { window.__bridgeLog.push(['pullEnd', JSON.parse(j)]); },
       onResumeResult: function (s) { window.__bridgeLog.push(['resume', s]); },
       onLikeTap: function (j) { window.__bridgeLog.push(['likeTap', JSON.parse(j)]); },
+      onMusicQueue: function (j) { window.__bridgeLog.push(['musicQueue', JSON.parse(j)]); },
       likeState: function (id) { return (window.__likeStates && window.__likeStates[id]) || ''; }
     };`;
 }
@@ -164,6 +165,24 @@ function nextResponse(kind) {
     const next = { watchEndpoint: { videoId: 'nextVid0001', playlistId: 'RDabc', index: 3 } };
     const item = (videoId, index, list) => ({ playlistPanelVideoRenderer: { videoId,
         navigationEndpoint: { watchEndpoint: { videoId, playlistId: list, index } } } });
+    if (kind === 'music-radio') {
+        // A YouTube Music radio as the live site sends it: titles, bylines (artist with its
+        // channel, album, year), lengths; started from seedSong001, now playing radioSong02.
+        const song = (videoId, n, selected) => ({ playlistPanelVideoRenderer: {
+            videoId, selected: !!selected,
+            title: { runs: [{ text: 'Song ' + n }] },
+            shortBylineText: { runs: [{ text: 'Artist ' + n, navigationEndpoint: { browseEndpoint: { browseId: 'UCartist' + String(n).padStart(16, '0') } } }] },
+            longBylineText: { runs: [{ text: 'Artist ' + n }, { text: ' \u2022 ' }, { text: 'Album' }, { text: ' \u2022 ' }, { text: '2021' }] },
+            lengthText: { runs: [{ text: n === 3 ? '1:02:03' : '3:4' + n }] },
+            navigationEndpoint: { watchEndpoint: { videoId, playlistId: 'RDAMVMseedSong001', index: n } } } });
+        const wrapped = (videoId, n) => ({ playlistPanelVideoWrapperRenderer: { primaryRenderer: song(videoId, n) } });
+        return { responseContext: {}, contents: { singleColumnMusicWatchNextResultsRenderer: { tabbedRenderer: {
+            watchNextTabbedResultsRenderer: { tabs: [{ tabRenderer: { content: { musicQueueRenderer: { content: {
+                playlistPanelRenderer: { playlistId: 'RDAMVMseedSong001', contents: [
+                    song('seedSong001', 0), wrapped('radioSong01', 1), song('radioSong02', 2, true),
+                    song('radioSong03', 3), song('radioSong01', 1), song('radioSong04', 4)] }
+                } } } } }] } } } } };
+    }
     if (kind === 'music') {
         // YouTube Music: the queue in a playlistPanelRenderer, songs wrapped as song/video pairs,
         // the current song marked "selected", and (here) no currentVideoEndpoint.
@@ -455,6 +474,66 @@ console.log('App upsell dialog');
     await sleep(300);
     const hidden = await page.evaluate(() => getComputedStyle(document.getElementById('upsell2')).display);
     check('dialog without a close button is hidden', hidden === 'none', hidden);
+
+    // Other wordings: an "Open App" button with "Not now", and a prompt known by its text.
+    const addPrompt = (html, attrs = {}) => page.evaluate(({ h, a }) => {
+        const d = document.createElement(a.tag || 'div');
+        d.id = a.id;
+        if (a.role) d.setAttribute('role', a.role);
+        d.style.cssText = 'position:fixed;top:20px;left:20px;width:200px;height:200px;background:#333';
+        d.innerHTML = h;
+        d.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+            window.__promptClicks = (window.__promptClicks || []).concat(b.id);
+            if (b.dataset.closes) d.remove();
+        }));
+        document.body.appendChild(d);
+        window.dispatchEvent(new Event('yt-navigate-finish'));
+    }, { h: html, a: attrs });
+    await addPrompt('<p>Listen with the app</p><button id="openApp">Open App</button><button id="notNow" data-closes="1">Not now</button>',
+        { id: 'upsell3', tag: 'tp-yt-paper-dialog' });
+    await sleep(300);
+    check("'Open App' prompt closed with its own 'Not now'",
+        await page.evaluate(() => !document.getElementById('upsell3') && window.__promptClicks.join() === 'notNow'),
+        await page.evaluate(() => window.__promptClicks));
+    await addPrompt('<p>Keep listening in the YouTube Music app</p><button id="getIt">Open</button><button id="noThanks" data-closes="1">No thanks</button>',
+        { id: 'upsell4', role: 'dialog' });
+    await sleep(300);
+    check('prompt about the YouTube Music app closed by its text ("Open" button)',
+        await page.evaluate(() => !document.getElementById('upsell4') && !window.__promptClicks.includes('getIt')));
+    await addPrompt('<p>Sign in to like videos</p><button id="signInBtn">Sign in</button><button id="cancelBtn" data-closes="1">Cancel</button>',
+        { id: 'notUpsell', role: 'dialog' });
+    await sleep(300);
+    check('a dialog that is not about the app is left alone',
+        await page.evaluate(() => !!document.getElementById('notUpsell') &&
+            getComputedStyle(document.getElementById('notUpsell')).display !== 'none' && !window.__promptClicks.includes('cancelBtn')));
+    check("the top bar's 'Open App' button is not pressed", await page.evaluate(() => !window.__promptClicks.includes('openAppRenderer')));
+    await context.close();
+}
+{
+    // App hidden: a prompt that appeared while the page was not drawn and holds playback.
+    const { context, page } = await openWatchPage({ appVisible: false });
+    const addHeldPrompt = (id) => page.evaluate((pid) => {
+        const v = document.querySelector('video');
+        v.currentTime = 0;
+        v.pause();                                    // the page pauses (not the user)
+        const d = document.createElement('div');
+        d.id = pid;
+        d.setAttribute('role', 'dialog');
+        d.style.cssText = 'position:fixed;top:20px;left:20px;width:200px;height:200px;background:#333';
+        d.innerHTML = '<p>Get the app</p><button>Open YouTube Music</button><button class="x" aria-label="Close">x</button>';
+        d.querySelector('.x').addEventListener('click', () => d.remove());
+        document.body.appendChild(d);
+        window.dispatchEvent(new Event('yt-navigate-finish'));
+    }, id);
+    await addHeldPrompt('heldPrompt');
+    await sleep(700);
+    check('app hidden: a prompt holding playback is closed', await page.evaluate(() => !document.getElementById('heldPrompt')));
+    check('app hidden: playback continues after it', await page.evaluate(() => !document.querySelector('video').paused));
+    await page.evaluate(() => window.__streamShield.pause());
+    await addHeldPrompt('pausedPrompt');
+    await sleep(700);
+    check('app hidden, paused by the user: the page is left alone',
+        await page.evaluate(() => !!document.getElementById('pausedPrompt') && document.querySelector('video').paused));
     await context.close();
 }
 
@@ -635,6 +714,40 @@ console.log('Ad fallback (ad still starts)');
     await context.close();
 }
 
+// The player element re-created while an ad shows (YouTube does this on some navigations): the
+// skip timer must stop and sound/speed come back, or the next videos get skipped muted.
+{
+    const { context, page } = await openWatchPage({ speed: 1.25 });
+    await page.evaluate(() => document.querySelector('video').play());
+    await sleep(300);
+    await page.evaluate(() => document.getElementById('movie_player').classList.add('ad-showing'));
+    await sleep(150);
+    await page.evaluate(() => {
+        const old = document.getElementById('movie_player');
+        const fresh = document.createElement('div');
+        fresh.id = 'movie_player';
+        fresh.className = 'html5-video-player';
+        fresh.appendChild(document.querySelector('video'));
+        old.replaceWith(fresh);
+        window.dispatchEvent(new Event('yt-navigate-finish'));   // re-hooks the player now
+    });
+    await sleep(300);
+    await page.evaluate(() => {
+        const v = document.querySelector('video');
+        v.currentTime = 1;
+        v.play();
+    });
+    await sleep(500);
+    const swapped = await page.evaluate(() => {
+        const v = document.querySelector('video');
+        return { muted: v.muted, rate: v.playbackRate, t: v.currentTime, d: v.duration };
+    });
+    check('player swapped mid-ad: sound restored', swapped.muted === false, swapped);
+    check('player swapped mid-ad: speed restored', Math.abs(swapped.rate - 1.25) < 0.01, swapped);
+    check('player swapped mid-ad: content is not fast-forwarded', swapped.d - swapped.t > 1, swapped);
+    await context.close();
+}
+
 // ---------------------------------------------------------------------------------------------
 console.log('Background play');
 {
@@ -755,6 +868,8 @@ console.log('Picture-in-picture layout');
     }));
     check('PiP: page pause calls are refused (no pause/play stutter)', !pipPause.paused && pipPause.pauseEvents === 0, pipPause);
     check('PiP: refused pauses are counted for diagnostics', pipPause.state.pipBlocked === 3, pipPause.state);
+    check("PiP: YouTube's player is told to keep playing (keeps live streams loading)",
+        (await page.evaluate(() => window.__playVideoCalls)) >= 1);
     await page.evaluate(() => window.__streamShield.togglePlay()); // the PiP window's pause button
     await sleep(1200);
     check("PiP: the user's own pause is respected", await page.evaluate(() => document.querySelector('video').paused));
@@ -1035,6 +1150,36 @@ console.log('Autoplay while the app is hidden');
     await context.close();
 }
 
+
+// ---------------------------------------------------------------------------------------------
+console.log('YouTube Music queues (Music tab For you)');
+{
+    const queues = (page) => page.evaluate(() => window.__bridgeLog.filter((e) => e[0] === 'musicQueue').map((e) => e[1]));
+    const fetchNext = (page, kind) => page.evaluate(async (k) => {
+        await (await fetch('/youtubei/v1/next?kind=' + k, { method: 'POST' })).json();
+    }, kind);
+    let { context, page } = await openWatchPage({}, 'https://music.youtube.com/watch?v=radioSong02');
+    await fetchNext(page, 'music-radio');
+    let q = await queues(page);
+    const first = q[0];
+    check('the radio is reported under the song it started from', q.length === 1 && first.seed === 'seedSong001' &&
+        first.list === 'RDAMVMseedSong001', q);
+    check('songs once each, without the seed, in queue order',
+        first && first.items.map((i) => i.id).join() === 'radioSong01,radioSong02,radioSong03,radioSong04', first && first.items);
+    const s3 = first && first.items.find((i) => i.id === 'radioSong03');
+    check('title, artist, artist channel and length are read',
+        s3 && s3.title === 'Song 3' && s3.artist === 'Artist 3' && s3.channelId === 'UCartist0000000000000003' && s3.dur === 3723, s3);
+    await fetchNext(page, 'music-radio');
+    check('the same list is reported once', (await queues(page)).length === 1);
+    await fetchNext(page, 'music');
+    check('a queue of two songs is not reported', (await queues(page)).length === 1, await queues(page));
+    await context.close();
+
+    ({ context, page } = await openWatchPage({}, 'https://m.youtube.com/watch?v=abc123def45'));
+    await fetchNext(page, 'music-radio');
+    check('not reported from m.youtube.com', (await queues(page)).length === 0);
+    await context.close();
+}
 
 // ---------------------------------------------------------------------------------------------
 console.log("Taps on the page's play/pause button");

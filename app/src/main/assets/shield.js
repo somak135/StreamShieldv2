@@ -12,11 +12,13 @@
  *      / wrapped responses. Also shortens YouTube's 17 s native-code timers (uBO rule).
  *   2. Fallback: if an ad still starts, mute it, press skip, fast-forward to the end, then restore.
  *   3. Cosmetic CSS for leftover ad slots; hide YouTube's "Open App" / "Sign in" buttons and
- *      m.youtube's bottom bar (the app has its own tabs); the YouTube logo opens the app's Home.
+ *      m.youtube's bottom bar (the app has its own tabs); the YouTube logo opens the app's Home;
+ *      close "use the app" prompts (also while the app is hidden, if one could hold playback).
  *   4. Background play: keep the page "visible" so YouTube does not pause when the app is hidden.
  *   5. Playback speed, SponsorBlock segment skipping, PiP layout, play/pause/next/previous
  *      commands (through the page's own Media Session handlers when it has them) and autoplay,
  *      also while the app is hidden (the next video is taken from the watch-next responses).
+ *      YouTube Music's queues are reported to the app (the Music tab's "For you" uses them).
  *   6. Report compact playback state to the app (only when it changes), including the video's
  *      channel, length and position from the player response.
  *   7. Taps on the page's play/pause control that the page missed are applied by the app.
@@ -273,7 +275,7 @@
             return;
         }
         try { noteChannel(obj); } catch (e) {}
-        try {
+        if (!isBrowsePage()) try {
             captureNextVideo(obj);
             if (obj.response) captureNextVideo(obj.response);
             if (obj.watchNextResponse) captureNextVideo(obj.watchNextResponse);
@@ -360,6 +362,9 @@
             }
         }
         if (!currentId) return;
+        if (musicNext) {
+            try { reportMusicQueue(queues, currentId); } catch (e) {}
+        }
         // The current video's entry, found by id: contents can be a window of a long playlist, and
         // currentIndex is the position in the whole playlist, not in contents.
         var panel = null;
@@ -381,8 +386,81 @@
         nextByVideo[currentId] = { endpoint: next, inPlaylist: !!(found.playlist || panel || musicNext) };
     }
 
+    // YouTube Music's queue for a song: its radio (playlist "RDAMVM" + the song it started from)
+    // or the album / playlist being played. The app keeps these lists for the Music tab's "For
+    // you" as the songs YouTube Music plays after the seed song (no extra requests to YouTube).
+    // Each list is reported once, and again only if it grew.
+    var MUSIC_QUEUE_MAX = 50;
+    var reportedQueues = Object.create(null);
+
+    function runsText(t) {
+        if (!t) return '';
+        if (typeof t.simpleText === 'string') return t.simpleText;
+        if (!Array.isArray(t.runs)) return '';
+        return t.runs.map(function (r) { return (r && r.text) || ''; }).join('');
+    }
+
+    function artistChannelOf(item) {
+        var lists = [item.shortBylineText, item.longBylineText];
+        for (var l = 0; l < lists.length; l++) {
+            var runs = lists[l] && lists[l].runs;
+            if (!Array.isArray(runs)) continue;
+            for (var r = 0; r < runs.length; r++) {
+                var be = runs[r] && runs[r].navigationEndpoint && runs[r].navigationEndpoint.browseEndpoint;
+                if (be && /^UC[A-Za-z0-9_-]{22}$/.test(be.browseId || '')) return be.browseId;
+            }
+        }
+        return '';
+    }
+
+    function durationSeconds(text) {
+        var parts = String(text || '').trim().split(':');
+        if (parts.length < 2 || parts.length > 3) return 0;
+        var sec = 0;
+        for (var i = 0; i < parts.length; i++) {
+            var n = parseInt(parts[i], 10);
+            if (isNaN(n)) return 0;
+            sec = sec * 60 + n;
+        }
+        return sec;
+    }
+
+    function reportMusicQueue(queues, currentId) {
+        if (!isMusicSite() || isBrowsePage() || !queues.length) return;
+        var contents = queues[0];
+        for (var q = 0; q < queues.length; q++) {
+            for (var c = 0; c < queues[q].length; c++) {
+                if (queueItemId(queueItem(queues[q][c])) === currentId) { contents = queues[q]; q = queues.length; break; }
+            }
+        }
+        var listId = '';
+        var items = [];
+        var ids = Object.create(null);
+        for (var i = 0; i < contents.length && items.length <= MUSIC_QUEUE_MAX; i++) {
+            var item = queueItem(contents[i]);
+            var id = queueItemId(item);
+            if (!/^[A-Za-z0-9_-]{11}$/.test(id) || ids[id]) continue;
+            ids[id] = true;
+            var e = endpointOf(item);
+            if (!listId && e && typeof e.playlistId === 'string') listId = e.playlistId;
+            items.push({
+                id: id,
+                title: runsText(item.title),
+                artist: runsText(item.shortBylineText) || runsText(item.longBylineText).split(' \u2022 ')[0],
+                channelId: artistChannelOf(item),
+                dur: durationSeconds(runsText(item.lengthText))
+            });
+        }
+        var radio = /^RDAMVM([A-Za-z0-9_-]{11})$/.exec(listId);
+        var seed = radio ? radio[1] : currentId;
+        items = items.filter(function (it) { return it.id !== seed; }).slice(0, MUSIC_QUEUE_MAX);
+        if (items.length < 3 || (reportedQueues[seed] || 0) >= items.length) return;
+        reportedQueues[seed] = items.length;
+        report('onMusicQueue', JSON.stringify({ seed: seed, list: listId, items: items }));
+    }
+
     // Expose pure helpers for tests.
-    var internals = { pruneResponse: pruneResponse, isAdItem: isAdItem, noteDetails: noteDetails, nextByVideo: nextByVideo };
+    var internals = { nextByVideo: nextByVideo };
     internals.setAutoplayDelay = function (ms) { AUTOPLAY_DELAY_MS = ms; };
     internals.setAdvanceDelays = function (first, musicFallback) {
         ADVANCE_DELAY_MS = first;
@@ -461,10 +539,6 @@
         });
     })();
 
-    // YouTube's player can hold playback back with a 17 s timer whose callback is a bound
-    // (native-code) function. uBlock Origin's YouTube filters shorten exactly these timers
-    // ("nano-stb, [native code], 17000, 0.001": 17000 ms x 0.001 = 17 ms); same rule here.
-    // Only delays of exactly 17000 ms with a native-code callback are touched.
     // Start-up timing for in-page navigation: YouTube changes the URL with history.pushState once
     // the next page's data has arrived, so the user's tap is the real start. Ads pruned and timers
     // shortened since that tap belong to the new video.
@@ -518,6 +592,10 @@
         });
     })();
 
+    // YouTube's player can hold playback back with a 17 s timer whose callback is a bound
+    // (native-code) function. uBlock Origin's YouTube filters shorten exactly these timers
+    // ("nano-stb, [native code], 17000, 0.001": 17000 ms x 0.001 = 17 ms); same rule here.
+    // Only delays of exactly 17000 ms with a native-code callback are touched.
     var BOOST_DELAY_MS = 17000;
     (function installTimerBoost() {
         var nativeSetTimeout = window.setTimeout;
@@ -601,6 +679,7 @@
         'ytm-rich-item-renderer:has(ytm-ad-slot-renderer)',
         'ytm-item-section-renderer:has(> ytm-ad-slot-renderer)',
         'ytm-mealbar-promo-renderer',
+        'ytmusic-mealbar-promo-renderer',
         'ytm-statement-banner-renderer',
         'ytm-brand-video-singleton-renderer',
         'ytm-paid-content-overlay-renderer',
@@ -765,20 +844,48 @@
     // changes often. The bot-check "Sign in" inside the player is page content and is left alone.
     // Only the handful of buttons inside the top bar are checked, from tick(), so this stays cheap.
     var OPEN_APP_LABEL = /^(open (the )?app|sign in)$/i;
+    // m.youtube.com's top bar, or YouTube Music's nav bar / page header.
+    var TOP_BARS = 'ytm-mobile-topbar-renderer, #header-bar, ytmusic-nav-bar, header';
 
     function hideOpenAppButton() {
-        // m.youtube.com top bar, or YouTube Music's nav bar / page header.
-        var bars = document.querySelectorAll('ytm-mobile-topbar-renderer, #header-bar, ytmusic-nav-bar, header');
+        var bars = document.querySelectorAll(TOP_BARS);
         for (var b = 0; b < bars.length; b++) hideOpenAppIn(bars[b]);
     }
 
-    // "Watch in YouTube app" dialogs that still appear (other sources than the player response):
-    // press the dialog's own close button, or hide the dialog. Only short button labels are read.
-    var APP_UPSELL_LABEL = /^(watch|continue|open) (in|on|with) (the )?youtube( music)? app$/i;
-    var CLOSE_LABEL = /^(close|dismiss|not now|no,? thanks|cancel)$/i;
+    // "Use the app" prompts that still appear (other sources than the player response): press the
+    // prompt's own close button, or hide it. Found by the label of the button that opens the app
+    // ("Watch in YouTube app", "Open App", "Get the app", "Open YouTube Music", "Listen in the
+    // YouTube Music app"; English UI), or by a dialog's own text about the app when its button
+    // says something else. YouTube Music shows these after a page load (pull-to-refresh, autoplay
+    // opening the next song's page). Only short labels and small dialogs are read.
+    var APP_UPSELL_LABEL = new RegExp('^(' + [
+        '(watch|continue|open|listen|play) (in|on|with) (the )?(youtube( music)? )?app',
+        '(open|get|use) (the )?(youtube( music)? )?app',
+        'open youtube music'
+    ].join('|') + ')$', 'i');
+    var CLOSE_LABEL = new RegExp('^(' + [
+        'close', 'dismiss', 'not now', 'no,? thanks', 'cancel', 'maybe later',
+        '(continue|stay) (in|on|with) (the )?(browser|web|mobile web|website)',
+        'use (the )?(browser|web|website)( version)?'
+    ].join('|') + ')$', 'i');
+    var APP_PROMPTS = '[role="dialog"], [aria-modal="true"], dialog, tp-yt-paper-dialog, ' +
+        'ytmusic-mealbar-promo-renderer, ytm-mealbar-promo-renderer';
+    var APP_PROMPT_TEXT = /\b(youtube( music)? app|the app|open app|get the app)\b/i;
 
     function dismissAppUpsell() {
         if (!document.body) return false;
+        if (!closeUpsellByButton() && !closeAppPrompt()) return false;
+        if (isBrowsePage()) return true;
+        // The prompt holds back playback; start the video unless the user paused it (or, after
+        // autoplay moved on, wherever it is: resumeAfterAdvance does the same).
+        setTimeout(function () {
+            var v = findVideo();
+            if (v && v.paused && !v.ended && !userPaused && (v.currentTime < 2 || lastAdvanceAt)) resumeVideo(v);
+        }, 300);
+        return true;
+    }
+
+    function closeUpsellByButton() {
         // Buttons, plus links only inside dialogs (feeds have hundreds of links).
         var buttons = document.querySelectorAll(
             'button, [role="button"], [role="dialog"] a, [aria-modal="true"] a, dialog a'
@@ -787,15 +894,43 @@
             var text = (buttons[i].textContent || '').trim();
             if (!text || text.length > 40 || !APP_UPSELL_LABEL.test(text)) continue;
             if (buttons[i].offsetParent === null && getComputedStyle(buttons[i]).position !== 'fixed') continue;
-            if (closeDialogAround(buttons[i])) {
-                if (isBrowsePage()) return true;
-                // The dialog holds back autoplay; start the video unless the user paused it.
-                setTimeout(function () {
-                    var v = findVideo();
-                    if (v && v.paused && !v.ended && !userPaused && v.currentTime < 2) resumeVideo(v);
-                }, 300);
-                return true;
+            if (buttons[i].closest(TOP_BARS)) continue;   // hideOpenAppButton() takes care of those
+            if (closeDialogAround(buttons[i])) return true;
+        }
+        return false;
+    }
+
+    // Text of a small element with its pieces kept apart ("…app" + "Open" is not "appOpen").
+    function spacedText(el) {
+        var parts = [];
+        var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+        for (var n = walker.nextNode(); n; n = walker.nextNode()) parts.push(n.nodeValue);
+        return parts.join(' ').replace(/\s+/g, ' ').trim();
+    }
+
+    function closeAppPrompt() {
+        var boxes = document.querySelectorAll(APP_PROMPTS);
+        for (var i = 0; i < boxes.length; i++) {
+            var box = boxes[i];
+            if (box.style.display === 'none' || box.closest(TOP_BARS)) continue;
+            var r = box.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) continue;
+            if ((box.textContent || '').length > 1000) continue;
+            var text = spacedText(box);
+            if (!text || text.length > 600 || !APP_PROMPT_TEXT.test(text)) continue;
+            var video = findVideo();
+            if (video && box.contains(video)) continue;
+            var controls = box.querySelectorAll('button, [role="button"]');
+            for (var j = 0; j < controls.length; j++) {
+                var label = (controls[j].getAttribute('aria-label') || controls[j].textContent || '').trim();
+                if (CLOSE_LABEL.test(label)) {
+                    controls[j].click();
+                    return true;
+                }
             }
+            box.style.setProperty('display', 'none', 'important');
+            hideOverlayBackdrops();
+            return true;
         }
         return false;
     }
@@ -868,7 +1003,7 @@
     }
     var diag = newDiag('', Date.now() - Math.round((window.performance && performance.now()) || 0));
     // PiP pauses: refused page calls (YouTube's own code) vs pauses that came from the browser.
-    var pipStats = { blocked: 0, system: 0 };
+    var pipStats = { blocked: 0, system: 0, stalls: 0 };
     var allowPauseCall = false;   // true while the app itself pauses
     var lastPauseCallAt = 0;
 
@@ -882,12 +1017,29 @@
         proto.pause = function () {
             if (config.pip && !userPaused && !allowPauseCall && this.tagName === 'VIDEO' && !this.ended) {
                 pipStats.blocked++;
+                resyncPlayer();
                 return;
             }
             lastPauseCallAt = Date.now();
             return nativePause.apply(this, arguments);
         };
     })();
+
+    // The refused pause leaves YouTube's player believing it is paused, and a "paused" player
+    // stops downloading: invisible for normal videos (long buffer), but live streams run dry
+    // every few seconds. Tell the player to play again (at most every 2 s).
+    var lastResyncAt = 0;
+    function resyncPlayer() {
+        var now = Date.now();
+        if (now - lastResyncAt < 2000) return;
+        lastResyncAt = now;
+        setTimeout(function () {
+            var player = hookedPlayer || findPlayer();
+            if (config.pip && !userPaused && player && typeof player.playVideo === 'function') {
+                try { player.playVideo(); } catch (e) {}
+            }
+        }, 0);
+    }
 
     // Browse page: refuse playback (feed previews, or a watch page reached before the app moved
     // the video to the player page).
@@ -1198,14 +1350,15 @@
         if (isBrowsePage()) return;
         var video = hookedVideo;
         var playing = !!(video && !video.paused && !video.ended && !adActive);
-        var title = textOf('.slim-video-information-title, ytm-slim-video-metadata-section-renderer h2, h1.title') ||
-            (document.title || '').replace(/ - YouTube( Music)?$/, '').replace(/^YouTube( Music)?$/, '');
-        var channel = textOf('ytm-slim-owner-renderer .slim-owner-channel-name, .slim-owner-icon-and-title .subhead, #channel-name a');
         var videoId = currentVideoId();
-        if (!videoId && location.hostname === 'music.youtube.com' && details && video && !video.ended) {
+        if (!videoId && isMusicSite() && details && video && !video.ended) {
             videoId = details.videoId;
         }
         var d = details && details.videoId === videoId ? details : null;
+        // The player response names title and channel; the page is read only as a fallback.
+        var title = d && d.title ? '' : textOf('.slim-video-information-title, ytm-slim-video-metadata-section-renderer h2, h1.title') ||
+            (document.title || '').replace(/ - YouTube( Music)?$/, '').replace(/^YouTube( Music)?$/, '');
+        var channel = d && d.author ? '' : textOf('ytm-slim-owner-renderer .slim-owner-channel-name, .slim-owner-icon-and-title .subhead, #channel-name a');
         if (video && !adActive) {
             // Paused: exact position (used to resume). Playing: 10 s steps, so the state is not
             // re-reported every tick.
@@ -1234,6 +1387,7 @@
             startMs: diag.startMs,
             pipBlocked: pipStats.blocked,
             pipSystem: pipStats.system,
+            pipStalls: pipStats.stalls,
             adMs: diag.adMs,
             pruned: diag.pruned,
             boosted: diag.boosted,
@@ -1296,6 +1450,9 @@
             reportState();
             if (hiddenForAutoplay()) scheduleAutoAdvance(video);
             else scheduleAutoplay();
+        });
+        video.addEventListener('waiting', function () {
+            if (config.pip) pipStats.stalls++;
         });
         video.addEventListener('ratechange', function () {
             if (settingRate || adActive || Math.abs(video.playbackRate - config.speed) < 0.01) return;
@@ -1369,8 +1526,8 @@
         return 'restart';
     }
 
-    // If the page has not moved on by itself a few seconds after a video ended (YouTube's own
-    // autoplay can be off or throttled in the background / PiP), go to the next one.
+    // On screen: if the page has not moved on by itself a few seconds after a video ended
+    // (YouTube's own autoplay can be off), go to the next one. Hidden: scheduleAutoAdvance().
     var autoplayTimer = null;
     function scheduleAutoplay() {
         if (autoplayTimer) clearTimeout(autoplayTimer);
@@ -1379,7 +1536,7 @@
         autoplayTimer = setTimeout(function () {
             autoplayTimer = null;
             var v = findVideo();
-            if (config.autoplay && !adActive && currentVideoId() === endedId && v && v.ended) next();
+            if (config.autoplay && !adActive && !userPaused && currentVideoId() === endedId && v && v.ended) next();
         }, AUTOPLAY_DELAY_MS);
     }
     var AUTOPLAY_DELAY_MS = 4000;
@@ -1434,6 +1591,7 @@
     function cancelAutoAdvance() {
         advanceTimers.forEach(clearTimeout);
         advanceTimers = [];
+        if (autoplayTimer) { clearTimeout(autoplayTimer); autoplayTimer = null; }
     }
 
     function noteAdvance(how) {
@@ -1510,7 +1668,8 @@
         if (player && player !== hookedPlayer) {
             if (playerObserver) playerObserver.disconnect();
             hookedPlayer = player;
-            adActive = false;
+            // adActive is kept: if the new player shows no ad, onAdStateChanged() below restores
+            // sound and speed and stops the skip timer (resetting it here left the timer running).
             if (typeof MutationObserver === 'function') {
                 // Only the player's own class attribute: cheap, and it is where YouTube flags ads.
                 playerObserver = new MutationObserver(onAdStateChanged);
@@ -1550,6 +1709,16 @@
         lastPath = path;
     }
 
+    // Something should be playing but is not: autoplay just moved on, or the page paused the
+    // video in the last minute without the user asking through the app.
+    var HELD_CHECK_MS = 60000;
+    function playbackMayBeHeld() {
+        if (lastAdvanceAt) return true;
+        var v = hookedVideo;
+        return !!(v && v.paused && !v.ended && !userPaused && !adActive &&
+            Date.now() - lastPauseCallAt < HELD_CHECK_MS);
+    }
+
     function inForeground() {
         return config.appVisible !== false || !!config.pip;
     }
@@ -1562,6 +1731,10 @@
             dismissAppUpsell();
             markSubscribeButtons();
             markLikeButtons();
+        } else if (!isBrowsePage() && playbackMayBeHeld()) {
+            // A "use the app" prompt that appeared while hidden (e.g. on the next song's page)
+            // would hold playback until the app came back.
+            dismissAppUpsell();
         }
         if (isBrowsePage()) return;
         trackNavigation();
@@ -1586,7 +1759,8 @@
     function start() {
         tick();
         // YouTube is a single-page app: re-check after its own navigation events and on a slow
-        // heartbeat for title changes and player re-creation. All work in tick() is O(1) lookups.
+        // heartbeat for title changes and player re-creation (tick() skips page tidying while
+        // the app is hidden).
         ['yt-navigate-finish', 'state-navigateend', 'yt-page-data-updated', 'popstate'].forEach(function (type) {
             window.addEventListener(type, function () {
                 setTimeout(tick, 50);
