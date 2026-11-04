@@ -6,9 +6,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 /** Reading YouTube's topic pages (shapes from the live site, 3 Nov 2026; values made up). */
+// SDK 35 like the other Robolectric tests: SDK 36 needs Java 21, the build runs Java 17.
 @RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class YouTubeDestinationsTest {
 
     private val page = """
