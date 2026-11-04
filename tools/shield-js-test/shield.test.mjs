@@ -31,7 +31,7 @@ const PLAYER_RESPONSE_WITH_ADS = {
     playabilityStatus: { status: 'OK' },
     streamingData: { formats: [] },
     videoDetails: { videoId: 'abc123def45', title: 'Test video', author: 'Test Channel', channelId: 'UCtestchannel000000000AA',
-        lengthSeconds: '30', viewCount: '1234' },
+        lengthSeconds: '30', viewCount: '1234', keywords: ['Test Topic', 'another tag'] },
     microformat: { playerMicroformatRenderer: { category: 'Music' } },
     adPlacements: [{ adPlacementRenderer: { kind: 'AD_PLACEMENT_KIND_START' } }],
     playerAds: [{ playerLegacyDesktopWatchAdsRenderer: {} }],
@@ -140,6 +140,8 @@ function bridgeInit(config) {
       onResumeResult: function (s) { window.__bridgeLog.push(['resume', s]); },
       onLikeTap: function (j) { window.__bridgeLog.push(['likeTap', JSON.parse(j)]); },
       onMusicQueue: function (j) { window.__bridgeLog.push(['musicQueue', JSON.parse(j)]); },
+      onMusicUpcoming: function (j) { window.__bridgeLog.push(['musicUpcoming', JSON.parse(j)]); },
+      onVideoTopics: function (j) { window.__bridgeLog.push(['topics', JSON.parse(j)]); },
       likeState: function (id) { return (window.__likeStates && window.__likeStates[id]) || ''; }
     };`;
 }
@@ -821,6 +823,11 @@ console.log('Speed, SponsorBlock, state reporting');
         last.channelId === 'UCtestchannel000000000AA' && last.lengthSec === 30 && last.views === 1234 &&
         last.category === 'Music', last);
     check('while playing, position is reported in 10 s steps', last.pos % 10 === 0 && last.ended === false, last);
+    const topics = await page.evaluate(() => window.__bridgeLog.filter((e) => e[0] === 'topics').map((e) => e[1]));
+    check('a playing video\'s category and keywords are reported once (Home topic chips)',
+        topics.length === 1 && topics[0].id === 'abc123def45' && topics[0].cat === 'Music' &&
+        topics[0].kw.join('|') === 'Test Topic|another tag' && topics[0].ch === 'UCtestchannel000000000AA' &&
+        topics[0].chn === 'Test Channel', topics);
 
     await page.evaluate(() => window.__streamShield.pause());
     await sleep(150);
@@ -1169,8 +1176,14 @@ console.log('YouTube Music queues (Music tab For you)');
     const s3 = first && first.items.find((i) => i.id === 'radioSong03');
     check('title, artist, artist channel and length are read',
         s3 && s3.title === 'Song 3' && s3.artist === 'Artist 3' && s3.channelId === 'UCartist0000000000000003' && s3.dur === 3723, s3);
+    const upcoming = await page.evaluate(() => window.__bridgeLog.filter((e) => e[0] === 'musicUpcoming').map((e) => e[1]));
+    check('the upcoming songs start with the current one, in queue order',
+        upcoming.length === 1 && upcoming[0].current === 'radioSong02' && upcoming[0].list === 'RDAMVMseedSong001' &&
+            upcoming[0].items.map((i) => i.id).join() === 'radioSong02,radioSong03,radioSong04', upcoming);
     await fetchNext(page, 'music-radio');
     check('the same list is reported once', (await queues(page)).length === 1);
+    check('unchanged upcoming songs are not reported again',
+        (await page.evaluate(() => window.__bridgeLog.filter((e) => e[0] === 'musicUpcoming').length)) === 1);
     await fetchNext(page, 'music');
     check('a queue of two songs is not reported', (await queues(page)).length === 1, await queues(page));
     await context.close();
@@ -1178,6 +1191,39 @@ console.log('YouTube Music queues (Music tab For you)');
     ({ context, page } = await openWatchPage({}, 'https://m.youtube.com/watch?v=abc123def45'));
     await fetchNext(page, 'music-radio');
     check('not reported from m.youtube.com', (await queues(page)).length === 0);
+    await context.close();
+}
+
+// ---------------------------------------------------------------------------------------------
+console.log('Waiting for data, and starting a page the app opened');
+{
+    const lastState = (page) => page.evaluate(() => {
+        const s = window.__bridgeLog.filter((e) => e[0] === 'state');
+        return s.length ? s[s.length - 1][1] : null;
+    });
+    let { context, page } = await openWatchPage();
+    await page.evaluate(async () => { await document.querySelector('video').play(); });
+    await page.evaluate(() => {
+        document.querySelector('video').dispatchEvent(new Event('waiting'));
+        window.__streamShield.reportState(true);   // what the next heartbeat sends
+    });
+    const stalled = await lastState(page);
+    check('waiting for data is reported with its start time', stalled && stalled.stallAt > 0, stalled);
+    await page.evaluate(() => document.querySelector('video').dispatchEvent(new Event('playing')));
+    await page.evaluate(() => window.__streamShield.reportState(true));
+    check('playing again clears it', (await lastState(page)).stallAt === 0, await lastState(page));
+    await context.close();
+
+    ({ context, page } = await openWatchPage({ appVisible: false }, 'https://music.youtube.com/watch?v=abc123def45'));
+    await page.evaluate(() => {
+        const v = document.querySelector('video');
+        v.pause();
+        v.currentTime = 0;
+    });
+    await page.evaluate(() => window.__streamShield.autoStart());
+    await page.waitForFunction(() => !document.querySelector('video').paused, null, { timeout: 3000 }).catch(() => {});
+    check('autoStart plays the song of a page the app opened', await page.evaluate(() => !document.querySelector('video').paused));
+    check('and is noted for diagnostics', (await lastState(page))?.adv === 'app', await lastState(page));
     await context.close();
 }
 

@@ -48,11 +48,14 @@ it is not on the Play Store.
 - Home → **For you**: fresh uploads from your subscriptions first, then a mix of videos related
   to what you watched in the app, channels you watch often and your recent searches. Each
   pull-down draws a new mix, and more loads as you scroll.
-- Home and the Music tab are laid out like the YouTube and YouTube Music apps. Home has tabs
-  Home · Subs · Recently uploaded · New to you. The Music tab has mood chips, Speed dial, Quick
-  picks (its own For you: songs from YouTube Music's "Up next" for songs you played, related songs
-  and new uploads of artists you play often), radios, Forgotten favorites, and YouTube Music's own
-  home shelves below. A song plays in YouTube Music, whose radio continues after it.
+- Home and the Music tab are laid out like the YouTube and YouTube Music apps. Home has a row
+  of chips like the app's: All, Subs, YouTube's topic pages (Music, Gaming, Live, News, Podcasts,
+  and Sports or Learning if you watch them), topics picked from the videos you watch and your
+  searches, Recently uploaded, Watched and New to you, plus Explore. The Music tab has mood chips,
+  Speed dial, Quick picks (its own For you: songs from YouTube Music's "Up next" for songs you
+  played, related songs and new uploads of artists you play often), radios, Forgotten favorites,
+  and YouTube Music's own home shelves below. A song plays in YouTube Music, whose radio
+  continues after it.
 - Backups: export and import everything as one file, an optional daily backup to a folder you
   choose, and import of your YouTube watch history from Google Takeout.
 
@@ -62,6 +65,10 @@ it is not on the Play Store.
 - **Smart downloads** (music; 1 GB by default, adjustable or off in Settings): keeps songs you
   listen to plus related ones, refreshed once a day on Wi-Fi while charging. These stay inside the
   app.
+- **When the connection drops** on YouTube Music, downloaded songs play instead: the queue's next
+  songs first, then related ones. YouTube Music takes over again once the connection is back.
+  To have the queue's songs at hand, the next 4 songs are kept ready in a small cache while music
+  plays (at most 60 MB, emptied when the app is swiped away; can be turned off in Settings).
 
 ## Install
 

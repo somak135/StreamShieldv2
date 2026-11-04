@@ -49,10 +49,16 @@ class OfflinePlayerController(
     private var queue: List<OfflineItemEntity> = emptyList()
     private var released = false
     private var positionJob: Job? = null
+    /** Paused at the end of a song because the app asked so (back to YouTube Music next). */
+    private var pausedAtEnd = false
 
     init {
         player.addListener(object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) = publish()
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                pausedAtEnd = !playWhenReady && reason == Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM
+            }
 
             // Position updates (mini-player bar, history) only while something plays.
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -78,7 +84,12 @@ class OfflinePlayerController(
             }
         })
         activity.lifecycleScope.launch {
-            viewModel.offlinePlayRequests.collect { request -> play(request.items, request.index) }
+            viewModel.offlinePlayRequests.collect { request -> play(request.items, request.index, request.startMs) }
+        }
+        // Downloaded songs playing while the connection was gone: once it is back, stop at the
+        // end of the song (YouTube Music continues then).
+        activity.lifecycleScope.launch {
+            viewModel.offlinePauseAtEnd.collect { pause -> player.pauseAtEndOfMediaItems = pause }
         }
         activity.lifecycleScope.launch {
             viewModel.playbackSource.collect { source ->
@@ -107,17 +118,19 @@ class OfflinePlayerController(
 
     private fun play() {
         if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L)
+        pausedAtEnd = false
         player.play()
     }
 
-    fun play(items: List<OfflineItemEntity>, index: Int) {
+    fun play(items: List<OfflineItemEntity>, index: Int, startMs: Long = 0L) {
         if (released || items.isEmpty()) return
         activity.lifecycleScope.launch {
             // Cover images are read from disk off the main thread.
             val mediaItems = withContext(Dispatchers.IO) { items.map { mediaItem(it) } }
             if (released) return@launch
             queue = items
-            player.setMediaItems(mediaItems, index.coerceIn(0, items.lastIndex), 0L)
+            pausedAtEnd = false
+            player.setMediaItems(mediaItems, index.coerceIn(0, items.lastIndex), startMs.coerceAtLeast(0L))
             player.prepare()
             player.play()
         }
@@ -166,7 +179,7 @@ class OfflinePlayerController(
                 lengthSec = durationSec,
                 category = if (item.isMusic) "Music" else "",
                 positionSec = (player.currentPosition / 1000).toInt(),
-                ended = player.playbackState == Player.STATE_ENDED
+                ended = player.playbackState == Player.STATE_ENDED || pausedAtEnd
             )
         )
     }

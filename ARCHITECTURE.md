@@ -265,13 +265,23 @@ Bridge methods run on a background thread; the controllers post to the main thre
 - `ForYouRule.kt` (the reviewed "For you" rule, pure Kotlin) and `ForYouRepository.kt` (reads
   the library, fetches related / related-of-related / search lists and watched channels' RSS
   feeds within a budget, caches them, tracks what was shown, saves it all in `for_you.json`).
+- `HomeChipRule.kt` (Home's agreed chip row: topic pages, topics from watched videos' keywords
+  and searches, a topic's list, Watched; pure Kotlin), `YouTubeDestinations.kt` (YouTube's topic
+  pages, InnerTube WEB browse without cookies, parsed by hand) and `HomeTopics.kt` (watched
+  videos' category and keywords from `onVideoTopics`, `home_topics.json`).
 - `MusicForYouRule.kt` (the Music tab's agreed "For you" rule for songs, pure Kotlin) and
   `MusicForYouRepository.kt` (keeps YouTube Music's queues reported by the page, fetches a few
   related lists and followed artists' RSS feeds, saves it all in `music_for_you.json`).
 
 ### `offline/`
 - `OfflinePlayerController.kt`: ExoPlayer for downloads; reports its state in the same shape as the
-  web player and takes the media buttons while it is the active player.
+  web player and takes the media buttons while it is the active player. It can stop at the end of
+  the song (`offlinePauseAtEnd`) and start mid-song (`OfflinePlayRequest.startMs`).
+- `FallbackRule.kt`: the agreed rule for playing downloaded songs when the connection is gone
+  (when to switch, the order of the songs, when and where YouTube Music continues; pure Kotlin).
+- `NetworkMonitor.kt`: Android's default network, usable when it has internet and was validated.
+- `UpNextCache.kt`: the up-next cache (`cacheDir/upnext`): the next songs of YouTube Music's queue,
+  fetched one at a time while music plays (NewPipe → `StreamChoice.audioPlan` → `RangeFetcher`).
 
 ## Key flows
 
@@ -287,6 +297,18 @@ stream with sound built in) → `RangeFetcher` → `MediaRemuxer` → `OfflineSt
 on "Refresh now" / size changes) and applies `SmartRule` (see its KDoc for the reviewed rule) to
 the listening log (`play_events`, one row per play, written by the view model), likes, playlists,
 subscriptions and feedback; Discover uses YouTube's related lists via NewPipe Extractor.
+
+**No connection on YouTube Music.** `shield.js` reports the queue from the current song on
+(`onMusicUpcoming`), when the media element waits for data (`stallAt`) and whether the user paused
+(`up`). The view model keeps the up-next cache in step with the queue (`refreshUpNext`), follows
+playback (`trackForFallback`: when a song that should start does not) and checks
+`FallbackRule.trigger` every second (`fallbackTick`). A switch (`startFallback`) orders the
+downloads and cached songs with `FallbackRule.order`, makes the offline player the source and
+freezes the cache. Once `FallbackRule.mayReturn`, the offline player stops at the end of the song
+and `returnToYouTubeMusic` opens the queue's next song (`webStartRequests` →
+`BrowserController.loadAndStart`, which calls `autoStart()` once the page is there). While the
+switch lasts, YouTube Music starting by itself is paused again (`webPauseRequests`) unless its page
+is on screen; anything the user opens on YouTube ends the switch (`switchToWebPlayback`).
 
 **Playback source.** `StreamShieldViewModel.playbackSource` is WEB or OFFLINE. The active player
 reports `WebVideoState` and takes the media buttons (`PlaybackCommands`); the mini-player,
@@ -410,7 +432,9 @@ button, calls `onHideCustomView`.
 - `app/src/test/.../data/LibraryTest.kt` covers the database migrations, library round trips, the
   RSS and Takeout parsers and page classification; `download/SmartRuleTest.kt` and
   `recommend/ForYouRuleTest.kt` cover the two reviewed rules, `recommend/MusicForYouRuleTest.kt`
-  the music rule.
+  the music rule, `offline/FallbackRuleTest.kt` the switch to downloaded songs,
+  `recommend/HomeChipRuleTest.kt` Home's chips and `recommend/YouTubeDestinationsTest.kt` reading
+  YouTube's topic pages.
 - `tools/shield-js-test/shield.test.mjs` runs `shield.js` in headless Chromium against mock
   YouTube pages. It covers pruning, the ad fallback, background-play events, speed, SponsorBlock,
   PiP layout, page routing, the heartbeat, play/pause tap fixes, Subscribe and Like / Dislike

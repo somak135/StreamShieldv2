@@ -7,6 +7,38 @@ Releases are published from version tags: <https://github.com/streamshield-app/S
 In [somak135/StreamShieldv2](https://github.com/somak135/StreamShieldv2) after `c6f91f2` (the fork
 keeps its application id `com.aistudio.streamshield.vytkzp`):
 
+- **Home's chip row like the YouTube app** (`recommend/HomeChipRule.kt`, agreed rule): the 4
+  tabs became a scrolling row of chips with an Explore button: All (For you) · Subs · YouTube's
+  topic pages you watch most · your topics · the other topic pages · Recently uploaded · Watched
+  · New to you. Topic pages are YouTube's own Music, Gaming, Live, News and Podcasts pages (plus
+  Sports and Learning when you watch those categories), loaded signed out like its website does
+  (`recommend/YouTubeDestinations.kt`; checked 3 Nov 2026), with YouTube's search as a fallback.
+  Your topics come from the keywords creators give the videos you watch (at least 3 videos from
+  2 channels; recent ones count more) and your recent short searches; a topic shows For you
+  videos about it and YouTube's results for it. Watched lists videos you finished or played
+  twice. Explore lists the topic pages (shown in the app) and Movies & TV and Charts
+  (on YouTube). shield.js reports a playing video's category and keywords once
+  (`onVideoTopics`, kept in `home_topics.json`, cleared with the watch history; nothing is
+  recorded while history is paused).
+- **No connection: downloaded songs play instead** (`offline/FallbackRule.kt`, agreed rule). On
+  YouTube Music, when a song ends and Android reports no working internet (after 1.5 s), when the
+  next song has not started after 10 s, or when a song waits for data for 10 s (5 s without
+  internet), the app plays downloaded songs: first the songs of YouTube Music's queue that are
+  here (in its order), then songs YouTube lists with the current one, songs by the same artist,
+  then smart downloads by rank and the other song downloads (songs played in the last 2 hours
+  left out, except queue songs). A song cut off while waiting for data continues from where it
+  was if it is here. At most one switch per song; never after you paused, and not for a song
+  paused in the middle (a call). Once the connection has worked for 20 s (5 min if it switched
+  while Android still reported a connection), the downloaded song finishes and YouTube Music
+  continues its queue after the last of its songs that played. The notification stays in the
+  foreground through both switches.
+- **Keep next songs ready** (up-next cache, `offline/UpNextCache.kt`, on by default in Settings →
+  Downloads): while YouTube Music plays, its next 4 songs are downloaded one at a time (audio,
+  normal quality, also on mobile data) into the app's cache, separate from smart downloads and
+  not listed under Downloads. Kept: the song playing, the next 4 and the last 2 played; at most
+  60 MB; nothing fetched with less than 1 GB free; songs already downloaded are not fetched
+  again. Emptied when the app is swiped away and when it starts. Settings → Diagnostics shows the
+  cache and the last switch.
 - **Home like the YouTube app:** a top bar with search (a full-screen search with recent
   searches), tabs Home · Subs · Recently uploaded · New to you that swipe, and full-width video
   cards (720p thumbnail, channel letter, title, "channel · views · age", menu). Home is For you;
@@ -34,8 +66,10 @@ keeps its application id `com.aistudio.streamshield.vytkzp`):
   "Open YouTube Music", dialogs whose text is about the app) with their own Not now / No thanks /
   Close; while the app is hidden they are closed too if one could hold playback (autoplay just
   moved on, or the page paused the song).
-- Tests: `MusicForYouRuleTest`, `MusicShelvesTest`; shield.js tests for the new prompts and
-  YouTube Music queues.
+- Tests: `MusicForYouRuleTest`, `MusicShelvesTest`, `FallbackRuleTest`, `HomeChipRuleTest`,
+  `YouTubeDestinationsTest`; shield.js tests for the
+  new prompts, YouTube Music queues, the upcoming songs, waiting for data and starting a page the
+  app opened.
 
 Merged from [somak135/StreamShieldv2](https://github.com/somak135/StreamShieldv2) (commit `c6f91f2`).
 

@@ -50,6 +50,23 @@ import com.example.recommend.YouTubeMusicHome
 import com.example.recommend.YtmHomeState
 import com.example.recommend.YtmItem
 import com.example.recommend.YtmPage
+import com.example.recommend.ChipVideo
+import com.example.recommend.ExploreEntry
+import com.example.recommend.HomeChip
+import com.example.recommend.HomeChipKind
+import com.example.recommend.HomeChipRule
+import com.example.recommend.HomeTopics
+import com.example.recommend.YouTubeDestinations
+import com.example.data.formatAgo
+import com.example.data.formatCount
+import com.example.offline.FallbackRule
+import com.example.offline.FallbackTrigger
+import com.example.offline.LocalSong
+import com.example.offline.NetworkMonitor
+import com.example.offline.QueueSong
+import com.example.offline.UpNextCache
+import com.example.offline.WebSnapshot
+import com.example.offline.artistKeyOf
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import org.json.JSONObject
@@ -87,6 +104,21 @@ const val MUSIC_HOME_URL = "https://music.youtube.com"
 private const val YTM_HOME_TTL_MS = 60L * 60 * 1000
 /** Pages of YouTube Music's home shelves loaded as the music home is scrolled. */
 private const val YTM_MAX_PAGES = 6
+/** Home's chip row is built again at most this often (and on pull-down). */
+private const val HOME_CHIPS_TTL_MS = 10L * 60 * 1000
+/** A topic page's list (YouTube's Music, Gaming, ... page) is loaded again after this. */
+private const val PAGE_FEED_TTL_MS = 60L * 60 * 1000
+/** A topic chip's list (For you matches and search) is loaded again after this. */
+private const val TOPIC_FEED_TTL_MS = 6L * 60 * 60 * 1000
+/** YouTube Music counts as playing (up-next cache fetches) this long after it last played. */
+private const val UP_NEXT_PLAYING_MS = 60_000L
+/** A song that stops this soon after music played is expected to be followed by the next one. */
+private const val EXPECTED_PLAYING_MS = 30_000L
+/** While downloaded songs start, the notification keeps showing "playing" for at most this. */
+private const val FALLBACK_START_HOLD_MS = 10_000L
+/** YouTube Music songs remembered as played before the current one. */
+private const val RECENT_MUSIC_MAX = 5
+private val SONG_ID = Regex("^[A-Za-z0-9_-]{11}$")
 
 data class BrowserUiState(
     val url: String = HOME_URL,
@@ -139,8 +171,23 @@ data class DownloadSheetState(
     val error: String? = null
 )
 
+/** YouTube Music's songs from the current one on (the current song first), from the page. */
+data class Upcoming(val listId: String, val songs: List<QueueSong>)
+
+/** A topic or topic-page chip's list on Home ([key]: [HomeChip.key]). */
+data class ChipFeedState(
+    val key: String = "",
+    val loading: Boolean = false,
+    val videos: List<ChipVideo> = emptyList(),
+    val note: String = "",
+    val loadedAt: Long = 0L
+)
+
+/** The last switch to downloaded songs (Settings → Diagnostics). */
+data class FallbackDiagnostics(val at: Long = 0L, val reason: String = "", val songs: Int = 0, val back: String = "")
+
 /** Downloaded items to play, starting at [index]. */
-data class OfflinePlayRequest(val items: List<OfflineItemEntity>, val index: Int)
+data class OfflinePlayRequest(val items: List<OfflineItemEntity>, val index: Int, val startMs: Long = 0L)
 
 /** Largest gap between two progress writes that still counts as listening (seconds). */
 private const val MAX_LISTEN_STEP_SEC = 45
@@ -403,6 +450,23 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     private var homeRefreshJob: Job? = null
 
     // ---- Music tab: the app's music home (For you, recently played) or YouTube Music's page ----
+    // ---- Home's chip row (HomeChipRule) ----
+    private val homeTopics = HomeTopics(application)
+    private val _homeChips = MutableStateFlow(HomeChipRule.chips(emptyList(), emptyList(), 0L))
+    val homeChips: StateFlow<List<HomeChip>> = _homeChips.asStateFlow()
+    private val _homeChip = MutableStateFlow("all")
+    /** The selected chip's [HomeChip.key]. */
+    val homeChip: StateFlow<String> = _homeChip.asStateFlow()
+    private val _chipFeed = MutableStateFlow(ChipFeedState())
+    val chipFeed: StateFlow<ChipFeedState> = _chipFeed.asStateFlow()
+    private val chipFeeds = ConcurrentHashMap<String, ChipFeedState>()
+    private val chipLoads: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    @Volatile
+    private var homeChipsBuiltAt = 0L
+    /** A topic page opened from Explore that is not in the row (shown after Subs). */
+    @Volatile
+    private var exploreChip: HomeChip? = null
+
     private val musicForYou = MusicForYouRepository(application)
     val musicForYouState: StateFlow<MusicForYouRepository.State> = musicForYou.state
     private val _musicRefreshing = MutableStateFlow(false)
@@ -481,6 +545,43 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
 
     private val _lastStart = MutableStateFlow<StartDiagnostics?>(null)
     val lastStart: StateFlow<StartDiagnostics?> = _lastStart.asStateFlow()
+
+    // ---- downloaded songs when the connection is gone (FallbackRule) and the up-next cache ----
+    private val network = NetworkMonitor(application)
+    private val upNext = UpNextCache(application, viewModelScope)
+    val upNextStats: StateFlow<UpNextCache.Stats> = upNext.stats
+    @Volatile
+    private var upcoming: Upcoming? = null
+    /** YouTube Music songs played before the current one, newest first. */
+    private val recentMusic = ArrayDeque<String>()
+    /** The YouTube Music song that played last. */
+    private var lastMusicId = ""
+    /** When YouTube Music last played, and since when it is not playing although it should (ms since 1970). */
+    private var lastWebPlayingAt = 0L
+    private var notPlayingSince = 0L
+    private var fallbackActive = false
+    /** The song the last switch happened at (at most one switch per song). */
+    private var fallbackFromId = ""
+    private var noSongsNotedFor = ""
+    /** When the switch happened, and until when the notification keeps "playing" (elapsed realtime). */
+    private var fallbackStartedAt = 0L
+    private var fallbackStartingUntil = 0L
+    /** YouTube Music's queue at the switch, and the songs played since (where it continues). */
+    private var fallbackQueue: List<QueueSong> = emptyList()
+    private var fallbackListId = ""
+    private val fallbackPlayed = LinkedHashSet<String>()
+    private var fallbackTicks = 0
+    private val _offlinePauseAtEnd = MutableStateFlow(false)
+    /** The offline player stops at the end of the song (YouTube Music continues then). */
+    val offlinePauseAtEnd: StateFlow<Boolean> = _offlinePauseAtEnd.asStateFlow()
+    private val _webStartRequests = MutableSharedFlow<String>(extraBufferCapacity = 2)
+    /** YouTube Music song pages to open and start (back from downloaded songs). */
+    val webStartRequests: SharedFlow<String> = _webStartRequests
+    private val _webPauseRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    /** The web player started by itself while downloaded songs play: pause it again. */
+    val webPauseRequests: SharedFlow<Unit> = _webPauseRequests
+    private val _fallbackDiagnostics = MutableStateFlow(FallbackDiagnostics())
+    val fallbackDiagnostics: StateFlow<FallbackDiagnostics> = _fallbackDiagnostics.asStateFlow()
 
     // Most recent blocked requests (host + path), newest first.
     private val _recentBlocked = MutableStateFlow<List<String>>(emptyList())
@@ -562,6 +663,22 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             refreshForYou(force = false)
         }
         viewModelScope.launch(Dispatchers.IO) { musicForYou.load() }
+        // The up-next cache starts empty (left over if the app was killed); then follow the
+        // connection and YouTube Music's playback.
+        viewModelScope.launch(Dispatchers.IO) { UpNextCache.clearDir(getApplication()) }
+        network.start()
+        viewModelScope.launch {
+            while (true) {
+                delay(1_000L)
+                fallbackTick()
+            }
+        }
+        viewModelScope.launch { network.online.collect { online -> if (online) refreshUpNext() } }
+        viewModelScope.launch {
+            preferences.map { it.upNextCacheEnabled }.distinctUntilChanged().collect { on ->
+                if (on) refreshUpNext() else if (!fallbackActive) upNext.clear()
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -634,10 +751,20 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             // unless the web page starts playing (e.g. a song tapped in YouTube Music): then it
             // takes over the mini-player, notification and media buttons.
             if (!state.isPlaying || state.videoId.isBlank()) return
+            if (fallbackActive && !webPageInView()) {
+                // YouTube Music started a song by itself (its data arrived late): the downloaded
+                // songs go on, and YouTube Music continues after them (see FallbackRule).
+                _webPauseRequests.tryEmit(Unit)
+                return
+            }
             switchToWebPlayback()
         }
         applyVideoState(state)
     }
+
+    /** YouTube Music's page is on screen (a song tapped there is the user's choice). */
+    private fun webPageInView(): Boolean =
+        _appVisible.value && (_playerExpanded.value || (_currentTab.value == AppTab.MUSIC && _musicPageShown.value))
 
     private fun applyVideoState(state: WebVideoState) {
         val previous = _videoState.value
@@ -684,6 +811,9 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         }
 
         recordProgress(previous, state)
+
+        // Before the notification update: going back to YouTube Music changes the source.
+        trackForFallback(state)
 
         syncBackgroundService(state)
     }
@@ -870,7 +1000,10 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         // took the service out of the foreground, which Android does not let it re-enter while
         // the screen is off.
         val holding = holdThroughAutoplayGap(state)
-        val playing = state.isPlaying || holding
+        // Switching to downloaded songs: no "paused" in between (see the gap below).
+        val switching = _playbackSource.value == PlaybackSource.OFFLINE &&
+            android.os.SystemClock.elapsedRealtime() < fallbackStartingUntil
+        val playing = state.isPlaying || holding || switching
         // Nothing to show until something actually plays; after that keep the controls updated.
         if (!playing && !bgSessionActive) return
         val signature = "${state.title}|${state.channel}|${state.durationSec}|$playing"
@@ -1081,6 +1214,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     fun clearWatchHistory() {
         viewModelScope.launch(Dispatchers.IO) {
             library.clearHistory()
+            homeTopics.clear()
             offlineDao.clearPlays()
             database.watchHistoryDao().clearAllHistory()
             showBanner("Watch history cleared")
@@ -1088,7 +1222,10 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun deleteHistoryEntry(videoId: String) {
-        viewModelScope.launch(Dispatchers.IO) { library.deleteHistoryEntry(videoId) }
+        viewModelScope.launch(Dispatchers.IO) {
+            library.deleteHistoryEntry(videoId)
+            homeTopics.remove(videoId)
+        }
     }
 
     fun toggleHistoryPaused(paused: Boolean) {
@@ -1343,9 +1480,25 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
-    /** Pull-down on Home: new uploads from subscriptions, then a new "For you" list. */
+    /**
+     * Pull-down on Home: on a topic or topic-page chip, its list again; otherwise new uploads from
+     * subscriptions, then a new "For you" list. The chip row is built again too.
+     */
     fun refreshHome() {
         if (homeRefreshJob?.isActive == true) return
+        val chip = _homeChips.value.firstOrNull { it.key == _homeChip.value }
+        rebuildHomeChips(force = true)
+        if (chip != null && (chip.kind == HomeChipKind.TOPIC || chip.kind == HomeChipKind.PAGE)) {
+            homeRefreshJob = viewModelScope.launch {
+                _homeRefreshing.value = true
+                try {
+                    loadChipFeed(chip, force = true)?.join()
+                } finally {
+                    _homeRefreshing.value = false
+                }
+            }
+            return
+        }
         homeRefreshJob = viewModelScope.launch(Dispatchers.IO) {
             _homeRefreshing.value = true
             try {
@@ -1377,6 +1530,143 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
 
     /** A "For you" video was opened (so it was not skipped). */
     fun forYouOpened(videoId: String) = forYou.opened(videoId)
+
+    // ---- Home's chip row -------------------------------------------------------------------
+
+    /** Home is on screen: the chip row is built from what was watched (at most every 10 minutes). */
+    fun onHomeShown() = rebuildHomeChips(force = false)
+
+    private fun rebuildHomeChips(force: Boolean) {
+        val now = System.currentTimeMillis()
+        if (!force && now - homeChipsBuiltAt < HOME_CHIPS_TTL_MS) return
+        homeChipsBuiltAt = now
+        viewModelScope.launch(Dispatchers.IO) {
+            val searches = try {
+                library.recentSearches(30).first().map { it.query to it.lastUsedAt }
+            } catch (_: Exception) {
+                emptyList()
+            }
+            val chips = HomeChipRule.chips(homeTopics.all(), searches, now)
+            val extra = exploreChip?.takeIf { e -> chips.none { it.key == e.key } }
+            _homeChips.value = if (extra == null) chips else chips.take(2) + extra + chips.drop(2)
+            // The selected topic dropped out of the row: back to All.
+            if (_homeChips.value.none { it.key == _homeChip.value }) _homeChip.value = HomeChip(HomeChipKind.ALL, "All").key
+        }
+    }
+
+    fun selectHomeChip(chip: HomeChip) {
+        _homeChip.value = chip.key
+        if (chip.kind == HomeChipKind.TOPIC || chip.kind == HomeChipKind.PAGE) loadChipFeed(chip, force = false)
+    }
+
+    /** Explore: a topic page in the app (selected as a chip), or a page on YouTube. */
+    fun openExplore(entry: ExploreEntry) {
+        val page = entry.page
+        if (page == null) {
+            openBrowse(if (entry.path.startsWith("http")) entry.path else HOME_URL + entry.path)
+            return
+        }
+        val chip = HomeChip(HomeChipKind.PAGE, page.label, page)
+        val chips = _homeChips.value
+        if (chips.none { it.key == chip.key }) {
+            exploreChip = chip
+            _homeChips.value = chips.take(2) + chip + chips.drop(2)
+        }
+        selectHomeChip(chip)
+    }
+
+    /** Shows [chip]'s list, loading it if it is not recent (or [force]); the job, if one started. */
+    private fun loadChipFeed(chip: HomeChip, force: Boolean): Job? {
+        val key = chip.key
+        val cached = chipFeeds[key]
+        val ttl = if (chip.kind == HomeChipKind.PAGE) PAGE_FEED_TTL_MS else TOPIC_FEED_TTL_MS
+        if (!force && cached != null && !cached.loading && System.currentTimeMillis() - cached.loadedAt < ttl) {
+            if (_homeChip.value == key) _chipFeed.value = cached
+            return null
+        }
+        val loading = (cached ?: ChipFeedState(key)).copy(loading = true)
+        if (_homeChip.value == key) _chipFeed.value = loading
+        if (!chipLoads.add(key)) return null
+        chipFeeds[key] = loading
+        return viewModelScope.launch(Dispatchers.IO) {
+            val result = try {
+                buildChipFeed(chip)
+            } catch (e: Exception) {
+                android.util.Log.w("StreamShield", "Home chip ${chip.label} could not be loaded", e)
+                ChipFeedState(key, false, cached?.videos.orEmpty(), "Could not load ${chip.label}. Pull down to try again.", 0L)
+            } finally {
+                chipLoads.remove(key)
+            }
+            chipFeeds[key] = result
+            if (_homeChip.value == key) _chipFeed.value = result
+        }
+    }
+
+    private suspend fun buildChipFeed(chip: HomeChip): ChipFeedState {
+        val now = System.currentTimeMillis()
+        val finished = try {
+            library.recentHistory(500).filter { it.watchedFraction >= 0.9f }.mapTo(HashSet()) { it.videoId }
+        } catch (_: Exception) {
+            HashSet()
+        }
+        val exclude = finished + dislikedSnapshot
+        val page = chip.page
+        if (chip.kind == HomeChipKind.PAGE && page != null) {
+            val loaded: List<ChipVideo> = try {
+                YouTubeDestinations.fetch(page)
+            } catch (e: Exception) {
+                android.util.Log.w("StreamShield", "YouTube's ${page.label} page could not be loaded", e)
+                emptyList()
+            }
+            val fromPage = loaded.filter { it.videoId !in exclude }
+            if (fromPage.isNotEmpty()) return ChipFeedState(chip.key, false, fromPage, "", now)
+            // The page did not answer (or had nothing): YouTube's results for its name instead.
+            val found = searchChipVideos(page.label).filter { !it.isShort && it.videoId !in exclude }
+            val note = if (found.isEmpty()) "YouTube's ${page.label} page could not be loaded. Pull down to try again."
+            else "YouTube's ${page.label} page could not be loaded; these are search results."
+            return ChipFeedState(chip.key, false, found, note, if (found.isEmpty()) 0L else now)
+        }
+        val pool = forYouState.value.items.map { v ->
+            ChipVideo(
+                v.videoId, v.title, v.channelId, v.channelName, v.durationSec,
+                chipMeta(v.viewCount, if (v.publishedAt > 0) formatAgo(v.publishedAt, now) else v.publishedText),
+                isShort = v.isShort
+            )
+        }
+        val videos = HomeChipRule.topicFeed(chip.label, pool, searchChipVideos(chip.label), exclude)
+        return ChipFeedState(
+            chip.key, false, videos,
+            if (videos.isEmpty()) "Nothing found for ${chip.label}. Pull down to try again." else "",
+            if (videos.isEmpty()) 0L else now
+        )
+    }
+
+    /** Blocking: YouTube's video results for [query] (first page) as chip videos; empty on failure. */
+    private fun searchChipVideos(query: String): List<ChipVideo> = try {
+        val now = System.currentTimeMillis()
+        NewPipeSupport.searchVideos(query).map { r ->
+            ChipVideo(
+                r.videoId, r.title, r.channelId, r.channelName, r.durationSec,
+                chipMeta(r.viewCount, if (r.uploadedAt > 0) formatAgo(r.uploadedAt, now) else r.uploadedText),
+                isShort = r.isShort
+            )
+        }
+    } catch (e: Exception) {
+        android.util.Log.w("StreamShield", "Search for \"$query\" failed", e)
+        emptyList()
+    }
+
+    private fun chipMeta(views: Long, age: String): String = listOfNotNull(
+        views.takeIf { it > 0 }?.let { "${formatCount(it)} views" },
+        age.takeIf { it.isNotBlank() }
+    ).joinToString(" · ")
+
+    /** A video's category and keywords from the page, once it plays (WebView's bridge thread). */
+    fun onVideoTopics(json: String) {
+        if (preferences.value.historyPaused) return
+        val topic = HomeTopics.parse(json, System.currentTimeMillis()) ?: return
+        homeTopics.record(topic)
+    }
 
     // ---------------------------------------------------------------------------------------
     // For you (Music tab)
@@ -1502,6 +1792,232 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     fun onMusicQueue(json: String) {
         val (seed, items) = MusicForYouRepository.parseQueue(json) ?: return
         musicForYou.addQueue(seed, items)
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // No connection: downloaded songs instead of YouTube Music (FallbackRule), and the up-next
+    // cache that keeps YouTube Music's next songs ready for that (UpNextCache)
+    // ---------------------------------------------------------------------------------------
+
+    /** YouTube Music's songs from the current one on, from the page (WebView's bridge thread). */
+    fun onMusicUpcoming(json: String) {
+        upcoming = parseUpcoming(json) ?: return
+        viewModelScope.launch { refreshUpNext() }
+    }
+
+    private fun parseUpcoming(json: String): Upcoming? = try {
+        val o = JSONObject(json)
+        val items = o.optJSONArray("items")
+        val songs = if (items == null) emptyList<QueueSong>() else (0 until items.length()).mapNotNull { i ->
+            val item = items.optJSONObject(i) ?: return@mapNotNull null
+            val id = item.optString("id")
+            if (!SONG_ID.matches(id)) null
+            else QueueSong(id, item.optString("title"), item.optString("artist"), item.optString("channelId"), item.optInt("dur"))
+        }
+        if (songs.isEmpty()) null else Upcoming(o.optString("list"), songs)
+    } catch (_: Exception) {
+        null
+    }
+
+    /** Keeps the up-next cache in step with YouTube Music's queue (main thread). */
+    private fun refreshUpNext() {
+        if (_playbackSource.value != PlaybackSource.WEB || fallbackActive) return
+        val up = upcoming ?: return
+        val current = lastMusicId
+        val at = up.songs.indexOfFirst { it.videoId == current }
+        if (current.isBlank() || at < 0) return
+        val download = preferences.value.upNextCacheEnabled && network.online.value &&
+            _videoState.value.isMusicPage && System.currentTimeMillis() - lastWebPlayingAt <= UP_NEXT_PLAYING_MS
+        val downloaded = offlineItems.value.filter { it.isDone }.mapTo(HashSet()) { it.videoId }
+        upNext.update(current, up.songs.drop(at + 1), recentMusic.toList(), download) { it in downloaded }
+    }
+
+    /** Follows playback for the switch to downloaded songs and back, and for the up-next cache. */
+    private fun trackForFallback(state: WebVideoState) {
+        if (_playbackSource.value == PlaybackSource.OFFLINE) {
+            if (!fallbackActive) return
+            if (state.isPlaying && state.videoId.isNotBlank()) {
+                fallbackPlayed.add(state.videoId)
+                fallbackStartingUntil = 0L
+            }
+            // The song ended: the connection is back (paused at its end), or the list ran out.
+            if (state.ended && (_offlinePauseAtEnd.value || network.online.value)) returnToYouTubeMusic()
+            return
+        }
+        if (!state.isMusicPage || state.videoId.isBlank()) {
+            notPlayingSince = 0L
+            return
+        }
+        val now = System.currentTimeMillis()
+        when {
+            state.isPlaying -> {
+                lastWebPlayingAt = now
+                notPlayingSince = 0L
+                if (state.videoId != lastMusicId) {
+                    if (lastMusicId.isNotBlank()) {
+                        recentMusic.remove(lastMusicId)
+                        recentMusic.addFirst(lastMusicId)
+                        while (recentMusic.size > RECENT_MUSIC_MAX) recentMusic.removeLast()
+                    }
+                    lastMusicId = state.videoId
+                    if (state.videoId != fallbackFromId) fallbackFromId = ""
+                    refreshUpNext()
+                }
+            }
+            state.pageUserPaused -> notPlayingSince = 0L
+            notPlayingSince == 0L && now - lastWebPlayingAt <= EXPECTED_PLAYING_MS && expectsPlayback(state) ->
+                notPlayingSince = now
+        }
+    }
+
+    /**
+     * Not playing, and the next song should play: a song YouTube Music moved on to has not
+     * started, or a song ended and autoplay goes on. A song paused in the middle (a call, another
+     * app's sound) is left alone.
+     */
+    private fun expectsPlayback(state: WebVideoState): Boolean = when {
+        state.videoId != lastMusicId -> state.positionSec <= 1
+        reachedEnd(state) -> preferences.value.autoplayEnabled &&
+            !(state.autoAdvance == "none" && System.currentTimeMillis() - state.autoAdvanceAt < 60_000L)
+        else -> false
+    }
+
+    /** Every second: switch to downloaded songs, or prepare going back to YouTube Music. */
+    private fun fallbackTick() {
+        if (fallbackActive) {
+            val back = FallbackRule.mayReturn(
+                android.os.SystemClock.elapsedRealtime(), network.online.value, network.changedAt, fallbackStartedAt
+            )
+            if (_offlinePauseAtEnd.value != back) _offlinePauseAtEnd.value = back
+            // The list ran out while offline, and the connection is back.
+            if (back && _playbackSource.value == PlaybackSource.OFFLINE && _videoState.value.ended) returnToYouTubeMusic()
+            return
+        }
+        if (_playbackSource.value != PlaybackSource.WEB) return
+        val state = _videoState.value
+        val from = state.videoId.ifBlank { lastMusicId }
+        if (from.isNotBlank() && from != fallbackFromId) {
+            val web = WebSnapshot(state.isMusicPage, state.isPlaying, state.pageUserPaused, state.stallAt)
+            val trigger = FallbackRule.trigger(System.currentTimeMillis(), network.online.value, web, notPlayingSince)
+            if (trigger != FallbackTrigger.NONE) startFallback(trigger, from, state)
+        }
+        if (++fallbackTicks % 15 == 0) refreshUpNext()
+    }
+
+    private fun startFallback(trigger: FallbackTrigger, from: String, state: WebVideoState) {
+        fallbackFromId = from
+        val queue = upcoming?.songs.orEmpty()
+        val listId = upcoming?.listId.orEmpty()
+        val at = queue.indexOfFirst { it.videoId == from }
+        val queueAfter = if (at >= 0) queue.drop(at + 1).map { it.videoId } else emptyList<String>()
+        // A song that did not finish (waiting for data, or not started) plays first if it is here.
+        val resumeCurrent = state.videoId == from && !reachedEnd(state)
+        val startMs = if (resumeCurrent) state.positionSec * 1000L else 0L
+        val artistKey = artistKeyOf(state.channel, state.channelId)
+        val listed = musicForYou.listedWith(from)
+        val cached = upNext.localSongs()
+        val downloads = offlineItems.value.filter { it.isDone && it.isMusic }
+        viewModelScope.launch {
+            val cutoff = System.currentTimeMillis() - FallbackRule.RECENT_HOURS * 3_600_000L
+            val recent = withContext(Dispatchers.IO) {
+                try {
+                    library.recentHistory(300).filter { it.lastWatchedAt >= cutoff }.mapTo(HashSet()) { it.videoId }
+                } catch (_: Exception) {
+                    emptySet<String>()
+                }
+            }
+            // Meanwhile YouTube Music may have started playing again, or another player took over.
+            val now = _videoState.value
+            if (fallbackActive || _playbackSource.value != PlaybackSource.WEB || (now.isPlaying && now.stallAt <= 0L)) return@launch
+            val local = cached + downloads.map {
+                LocalSong(it.videoId, it.title, it.channelName, it.channelId, it.durationSec, cached = false,
+                    smartRank = if (it.isSmart) it.smartRank else Int.MAX_VALUE)
+            }
+            val ordered = FallbackRule.order(from, artistKey, queueAfter, listed, local, recent)
+            val byId = downloads.associateBy { it.videoId }
+            val first = if (resumeCurrent) byId[from] ?: upNext.item(from) else null
+            val items = listOfNotNull(first) + ordered.mapNotNull { s -> if (s.cached) upNext.item(s.videoId) else byId[s.videoId] }
+            val reason = fallbackReason(trigger)
+            if (items.isEmpty()) {
+                if (noSongsNotedFor != from) {
+                    noSongsNotedFor = from
+                    showBannerFor("No connection, and no downloaded songs to play", 4000L)
+                }
+                _fallbackDiagnostics.value = FallbackDiagnostics(System.currentTimeMillis(), "$reason; no downloaded songs to play")
+                return@launch
+            }
+            flushProgress()
+            fallbackActive = true
+            fallbackStartedAt = android.os.SystemClock.elapsedRealtime()
+            fallbackStartingUntil = fallbackStartedAt + FALLBACK_START_HOLD_MS
+            fallbackQueue = queue
+            fallbackListId = listId
+            fallbackPlayed.clear()
+            if (!resumeCurrent) fallbackPlayed.add(from)
+            upNext.frozen = true
+            upNext.stopFetching()
+            _offlinePauseAtEnd.value = false
+            _playerExpanded.value = false
+            _showActionsSheet.value = false
+            _miniPlayerDismissedFor.value = ""
+            _playbackSource.value = PlaybackSource.OFFLINE
+            _offlineExpanded.value = false
+            _videoState.value = WebVideoState()
+            _offlinePlayRequests.tryEmit(OfflinePlayRequest(items, 0, if (first != null) startMs else 0L))
+            showBannerFor("No connection: playing downloaded songs", 3000L)
+            _fallbackDiagnostics.value = FallbackDiagnostics(System.currentTimeMillis(), reason, items.size)
+            launch {
+                delay(FALLBACK_START_HOLD_MS)
+                if (fallbackStartingUntil != 0L) {
+                    fallbackStartingUntil = 0L
+                    syncBackgroundService(_videoState.value)
+                }
+            }
+        }
+    }
+
+    private fun fallbackReason(trigger: FallbackTrigger): String = when (trigger) {
+        FallbackTrigger.NO_CONNECTION -> "no connection when the song ended"
+        FallbackTrigger.NOT_STARTING -> "the next song did not start within ${FallbackRule.START_TIMEOUT_MS / 1000} s"
+        FallbackTrigger.STALLED -> "the song was waiting for data"
+        FallbackTrigger.NONE -> ""
+    }
+
+    /** The connection is back: YouTube Music continues its queue after the songs that played. */
+    private fun returnToYouTubeMusic() {
+        val ids = fallbackQueue.map { it.videoId }
+        val next = fallbackQueue.getOrNull(FallbackRule.resumeIndex(ids, fallbackPlayed))
+        val listId = fallbackListId
+        val played = fallbackPlayed.size
+        endFallback()
+        switchToWebPlayback()
+        if (next == null) {
+            showBanner("Back online")
+            _fallbackDiagnostics.update { it.copy(back = "back online after $played songs (nothing queued)") }
+            return
+        }
+        val url = "$MUSIC_HOME_URL/watch?v=${next.videoId}" + (if (listId.isNotBlank()) "&list=" + Uri.encode(listId) else "")
+        // Playback is expected now: if YouTube Music cannot start the song, the switch happens again.
+        lastWebPlayingAt = System.currentTimeMillis()
+        notPlayingSince = 0L
+        _webStartRequests.tryEmit(url)
+        showBanner("Back online: YouTube Music continues")
+        _fallbackDiagnostics.update { it.copy(back = "back online after $played songs, continued with ${next.title.ifBlank { next.videoId }}") }
+    }
+
+    private fun endFallback() {
+        if (!fallbackActive) return
+        fallbackActive = false
+        fallbackStartingUntil = 0L
+        _offlinePauseAtEnd.value = false
+        upNext.frozen = false
+        fallbackPlayed.clear()
+        fallbackQueue = emptyList()
+        fallbackListId = ""
+    }
+
+    fun toggleUpNextCache(enabled: Boolean) {
+        viewModelScope.launch { prefsRepo.setUpNextCache(enabled) }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1982,6 +2498,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     /** Plays a downloaded item, with the other finished items of the same list as the queue. */
     fun playDownload(item: OfflineItemEntity) {
         if (!item.isDone) return
+        endFallback()
         flushProgress()
         val list = offlineItems.value.filter { it.isDone && it.isSmart == item.isSmart }
         val index = list.indexOfFirst { it.id == item.id }.coerceAtLeast(0)
@@ -2008,6 +2525,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
 
     /** Opening anything on YouTube hands the media controls back to the web player. */
     private fun switchToWebPlayback() {
+        endFallback()
         if (_playbackSource.value != PlaybackSource.OFFLINE) return
         flushProgress()
         _playbackSource.value = PlaybackSource.WEB
@@ -2136,6 +2654,8 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     }
 
     override fun onCleared() {
+        network.stop()
+        upNext.stopFetching()
         // Best effort: persist counts that have not been flushed yet.
         val snapshot = pendingCounts.value
         if (snapshot.ads > 0L || snapshot.requests > 0L) {

@@ -132,6 +132,20 @@ class MusicForYouRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Songs YouTube lists with [videoId]: its Up next and related lists, and the other Up next
+     * lists it is in (for downloaded songs to play when the connection is gone).
+     */
+    fun listedWith(videoId: String): Set<String> = synchronized(this) {
+        if (videoId.isBlank()) return emptySet()
+        val out = HashSet<String>()
+        upNext[videoId]?.items?.mapTo(out) { it.videoId }
+        related[videoId]?.items?.mapTo(out) { it.videoId }
+        upNext.values.filter { c -> c.items.any { it.videoId == videoId } }.forEach { c -> c.items.mapTo(out) { it.videoId } }
+        out.remove(videoId)
+        out
+    }
+
     /** Makes a new list ([force]: even if the current one is recent). */
     suspend fun refresh(force: Boolean) = withContext(Dispatchers.IO) {
         load()

@@ -184,6 +184,10 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             viewModel.playbackSource.collect { source -> if (source == PlaybackSource.OFFLINE) browser.pause() }
         }
+        // Downloaded songs while the connection was gone: YouTube Music stays paused, and
+        // continues with its next song once the connection is back.
+        lifecycleScope.launch { viewModel.webPauseRequests.collect { browser.pause() } }
+        lifecycleScope.launch { viewModel.webStartRequests.collect { url -> browser.loadAndStart(url) } }
         // After the collectors above: a shared link is loaded through them.
         handleIncomingIntent(intent)
 
@@ -474,6 +478,9 @@ fun StreamShieldApp(
     val offlineItems by viewModel.offlineItems.collectAsStateWithLifecycle()
     val downloadSheet by viewModel.downloadSheet.collectAsStateWithLifecycle()
     val forYouState by viewModel.forYouState.collectAsStateWithLifecycle()
+    val homeChips by viewModel.homeChips.collectAsStateWithLifecycle()
+    val homeChip by viewModel.homeChip.collectAsStateWithLifecycle()
+    val chipFeed by viewModel.chipFeed.collectAsStateWithLifecycle()
     val homeRefreshing by viewModel.homeRefreshing.collectAsStateWithLifecycle()
     val musicForYouState by viewModel.musicForYouState.collectAsStateWithLifecycle()
     val musicRefreshing by viewModel.musicRefreshing.collectAsStateWithLifecycle()
@@ -485,6 +492,8 @@ fun StreamShieldApp(
     val unsubscribeRequest by viewModel.unsubscribeRequest.collectAsStateWithLifecycle()
     val tapFixes by viewModel.tapFixes.collectAsStateWithLifecycle()
     val autoplayDiagnostics by viewModel.autoplayDiagnostics.collectAsStateWithLifecycle()
+    val upNextStats by viewModel.upNextStats.collectAsStateWithLifecycle()
+    val fallbackDiagnostics by viewModel.fallbackDiagnostics.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val pendingImport by viewModel.pendingImport.collectAsStateWithLifecycle()
@@ -747,6 +756,12 @@ fun StreamShieldApp(
                                         subscribedChannels = remember(subscriptions) { subscriptions.map { it.channelId }.toSet() },
                                         history = history,
                                         recentSearches = recentSearches,
+                                        chips = homeChips,
+                                        selectedChip = homeChip,
+                                        chipFeed = chipFeed,
+                                        onSelectChip = viewModel::selectHomeChip,
+                                        onExplore = viewModel::openExplore,
+                                        onHomeShown = viewModel::onHomeShown,
                                         onSearch = viewModel::search,
                                         onDeleteSearch = viewModel::deleteSearch,
                                         onOpenVideo = viewModel::openVideo,
@@ -863,6 +878,8 @@ fun StreamShieldApp(
                     pipStats = PipStats(videoState.pipBlockedPauses, videoState.pipSystemPauses, videoState.pipStalls),
                     tapFixes = tapFixes.count to tapFixes.lastTop,
                     autoplayDiagnostics = autoplayDiagnostics,
+                    upNextStats = upNextStats,
+                    fallbackDiagnostics = fallbackDiagnostics,
                     recentBlocked = recentBlocked,
                     onClose = viewModel::closeSettings,
                     onToggleAdBlock = viewModel::toggleAdBlock,
@@ -876,6 +893,7 @@ fun StreamShieldApp(
                     onToggleAutoplay = viewModel::toggleAutoplay,
                     onToggleShowStartTime = viewModel::toggleShowStartTime,
                     onSetSmartSize = viewModel::setSmartSize,
+                    onToggleUpNextCache = viewModel::toggleUpNextCache,
                     onRefreshSmart = viewModel::refreshSmartNow,
                     onResetDownloadQuality = viewModel::resetDownloadQuality,
                     onExportBackup = { exportBackupLauncher.launch(BackupManager.defaultFileName()) },

@@ -170,6 +170,19 @@ class BrowserController(
         load(url)
     }
 
+    /** After [loadAndStart]: start the song once its page is there, although nobody tapped it. */
+    private var autoStartAfterLoad = false
+
+    /**
+     * Opens a YouTube Music song's page and starts it (back from downloaded songs when the
+     * connection returned; the app may be in the background, where the page does not start it).
+     */
+    fun loadAndStart(url: String) {
+        if (destroyed) return
+        autoStartAfterLoad = true
+        load(url)
+    }
+
     private fun handleResumeResult(ok: Boolean, videoId: String, position: Int) {
         if (ok || destroyed) return
         // The player API did not take it: open the song's page and seek there.
@@ -449,6 +462,18 @@ class BrowserController(
             viewModel.onMusicQueue(json ?: return)
         }
 
+        /** YouTube Music's songs from the current one on (up-next cache, offline switch). */
+        @JavascriptInterface
+        fun onMusicUpcoming(json: String?) {
+            viewModel.onMusicUpcoming(json ?: return)
+        }
+
+        /** A video's category and keywords, once it plays (topic chips on Home). */
+        @JavascriptInterface
+        fun onVideoTopics(json: String?) {
+            viewModel.onVideoTopics(json ?: return)
+        }
+
         @JavascriptInterface
         fun onResumeResult(result: String?) {
             val resume = lastResume ?: return
@@ -529,6 +554,10 @@ class BrowserController(
             seekAfterLoad?.let { (id, pos) ->
                 seekAfterLoad = null
                 runPageCommand("seekWhenReady(${JSONObject.quote(id)}, $pos)")
+            }
+            if (autoStartAfterLoad) {
+                autoStartAfterLoad = false
+                runPageCommand("autoStart()")
             }
         }
 
@@ -669,7 +698,9 @@ class BrowserController(
                     tapFixes = o.optInt("tapFix"),
                     tapFixTop = o.optString("tapTop"),
                     autoAdvance = o.optString("adv"),
-                    autoAdvanceAt = o.optLong("advAt")
+                    autoAdvanceAt = o.optLong("advAt"),
+                    stallAt = o.optLong("stallAt"),
+                    pageUserPaused = o.optBoolean("up")
                 )
             } catch (_: Exception) {
                 null

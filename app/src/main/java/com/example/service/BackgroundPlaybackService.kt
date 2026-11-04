@@ -96,8 +96,10 @@ class BackgroundPlaybackService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // Swiping the app away destroys the activity and its WebView, so playback is over.
+        // Swiping the app away destroys the activity and its WebView, so playback is over; the
+        // up-next cache goes with it (as agreed: it lives only while the app is open).
         shutdown()
+        com.example.offline.UpNextCache.clearDir(this)
         super.onTaskRemoved(rootIntent)
     }
 

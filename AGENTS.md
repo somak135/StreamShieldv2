@@ -171,6 +171,13 @@ installs on a phone over USB.
   used for a week (`for_you.json`). The Music tab's For you fetches at most 4 related lists per
   refresh (3 more when loading more) and the followed artists' RSS feeds (6 h); YouTube Music's
   queues come from the page for free (`onMusicQueue`).
+- **YouTube's topic pages** (`recommend/YouTubeDestinations.kt`, Home's Music, Gaming, Live, ...
+  chips) are InnerTube WEB browse responses read by hand, signed out and without cookies. Each
+  page uses other renderers (`videoRenderer`, `gridVideoRenderer`, `videoCardRenderer`,
+  `lockupViewModel`), so the parser walks the whole response for them. Signed-out YouTube Home
+  (`FEwhat_to_watch`) is empty and `/feed/trending` now resolves to it (Trending was removed in
+  July 2025), so neither is used. Browse ids and params come from `navigation/resolve_url` of
+  the pages' links (youtube.com/gaming, /podcasts).
 - **YouTube Music's home shelves** (`recommend/YouTubeMusicHome.kt`) are InnerTube responses
   read by hand (shapes from the live site, October 2026). Continuations need the first
   response's `visitorData` as `X-Goog-Visitor-Id`, or YouTube returns an empty page. Loaded at
@@ -182,6 +189,13 @@ installs on a phone over USB.
   (`playbackMayBeHeld`), to keep the background heartbeat cheap.
 - **Like / Dislike buttons** follow the Subscribe pattern (capture-phase stop, sync state call).
   Comments have Like buttons too ("Like this comment …"); they must stay YouTube's.
+- **Downloaded songs when the connection is gone.** Two clocks: `FallbackRule.trigger` uses ms
+  since 1970 (the page's `stallAt`), `mayReturn` elapsed realtime (`NetworkMonitor.changedAt`).
+  Android's "validated" network does not see a weak signal, hence the timeouts and the 5-minute
+  wait before going back after such a switch. Keep the notification "playing" through both
+  switches (`fallbackStartingUntil`, and the autoplay gap on the way back), or Android 12+ will
+  not let the service back into the foreground from the background. A song paused in the middle
+  (a call takes the audio) must not count as "should be playing".
 - **Downloads.** Stream URLs expire and some need the client's user agent; `RangeFetcher` and
   `OfflineDownloader` handle that. Do not reintroduce placeholder or sample-video fallbacks.
 

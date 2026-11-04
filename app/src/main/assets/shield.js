@@ -291,8 +291,21 @@
             channelId: String(vd.channelId || ''),
             lengthSeconds: parseInt(vd.lengthSeconds, 10) || 0,
             viewCount: parseInt(vd.viewCount, 10) || 0,
-            category: mf && mf.category ? String(mf.category) : ''
+            category: mf && mf.category ? String(mf.category) : '',
+            keywords: Array.isArray(vd.keywords) ? vd.keywords.slice(0, TOPIC_KEYWORDS_MAX).map(String) : []
         };
+    }
+
+    // A video's topic (YouTube category and the creator's keywords), reported once per video
+    // once it plays on YouTube (not YouTube Music), for the topic chips on the app's Home.
+    var TOPIC_KEYWORDS_MAX = 30;
+    var topicsReportedFor = '';
+    function reportTopics(d) {
+        if (!d || d.videoId === topicsReportedFor || isMusicSite()) return;
+        topicsReportedFor = d.videoId;
+        report('onVideoTopics', JSON.stringify({
+            id: d.videoId, cat: d.category, kw: d.keywords || [], ch: d.channelId, chn: d.author
+        }));
     }
 
     // ---------------------------------------------------------------------------------------
@@ -434,16 +447,16 @@
             }
         }
         var listId = '';
-        var items = [];
+        var all = [];
         var ids = Object.create(null);
-        for (var i = 0; i < contents.length && items.length <= MUSIC_QUEUE_MAX; i++) {
+        for (var i = 0; i < contents.length && all.length < QUEUE_READ_MAX; i++) {
             var item = queueItem(contents[i]);
             var id = queueItemId(item);
             if (!/^[A-Za-z0-9_-]{11}$/.test(id) || ids[id]) continue;
             ids[id] = true;
             var e = endpointOf(item);
             if (!listId && e && typeof e.playlistId === 'string') listId = e.playlistId;
-            items.push({
+            all.push({
                 id: id,
                 title: runsText(item.title),
                 artist: runsText(item.shortBylineText) || runsText(item.longBylineText).split(' \u2022 ')[0],
@@ -451,12 +464,32 @@
                 dur: durationSeconds(runsText(item.lengthText))
             });
         }
+        reportUpcoming(all, currentId, listId);
         var radio = /^RDAMVM([A-Za-z0-9_-]{11})$/.exec(listId);
         var seed = radio ? radio[1] : currentId;
-        items = items.filter(function (it) { return it.id !== seed; }).slice(0, MUSIC_QUEUE_MAX);
+        var items = all.filter(function (it) { return it.id !== seed; }).slice(0, MUSIC_QUEUE_MAX);
         if (items.length < 3 || (reportedQueues[seed] || 0) >= items.length) return;
         reportedQueues[seed] = items.length;
         report('onMusicQueue', JSON.stringify({ seed: seed, list: listId, items: items }));
+    }
+
+    // The songs YouTube Music plays from the current one on (the current song first), for the
+    // app's up-next cache and for playing downloaded songs when the connection is gone.
+    // Reported whenever they change.
+    var QUEUE_READ_MAX = 100;
+    var UPCOMING_MAX = 25;
+    var lastUpcoming = '';
+    function reportUpcoming(all, currentId, listId) {
+        var at = -1;
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].id === currentId) { at = i; break; }
+        }
+        if (at < 0) return;
+        var upcoming = all.slice(at, at + UPCOMING_MAX);
+        var key = listId + '|' + upcoming.map(function (it) { return it.id; }).join(',');
+        if (key === lastUpcoming) return;
+        lastUpcoming = key;
+        report('onMusicUpcoming', JSON.stringify({ list: listId, current: currentId, items: upcoming }));
     }
 
     // Expose pure helpers for tests.
@@ -995,6 +1028,9 @@
     var settingRate = false;
     var lastLoadAt = 0;
     var userPaused = false;      // pause requested by the user through the app (notification, PiP button)
+    // When the video began waiting for data (0: it is not). Reported, so the app can play a
+    // downloaded song when this lasts (no connection).
+    var stallSince = 0;
     var pipKeeper = null;
     var adTimer = null;
     // Start-up diagnostics for the current video (shown in the app's settings).
@@ -1397,8 +1433,12 @@
             tapTop: tapFix.top,
             // Last time autoplay moved on while the app was hidden, and how.
             adv: lastAdvance.how,
-            advAt: lastAdvance.at
+            advAt: lastAdvance.at,
+            // Waiting for data since (ms since 1970; 0: not waiting), and a pause the user asked for.
+            stallAt: stallSince,
+            up: userPaused
         };
+        if (playing && d) reportTopics(d);
         var json = JSON.stringify(state);
         if (!force && json === lastStateJson) return;
         lastStateJson = json;
@@ -1424,6 +1464,7 @@
         video.addEventListener('durationchange', function () { if (adActive) fastForwardAd(); });
         video.addEventListener('playing', function () {
             userPaused = false;
+            stallSince = 0;
             cancelAutoAdvance();
             if (lastAdvanceAt && !adActive) clearAdvanceFlag();
             var id = currentVideoId();
@@ -1439,6 +1480,7 @@
             // Paused right after a tap in the page (its own controls): the user's choice, so the
             // app does not start it again (e.g. after closing an app-upsell dialog).
             if (!config.pip && !allowPauseCall && Date.now() - lastPointerAt < 1500) userPaused = true;
+            stallSince = 0;
             reportState();
             if (config.pip && !userPaused && !video.ended) {
                 // Not a page call (those are refused above): the browser paused it.
@@ -1447,13 +1489,17 @@
             }
         });
         video.addEventListener('ended', function () {
+            stallSince = 0;
             reportState();
             if (hiddenForAutoplay()) scheduleAutoAdvance(video);
             else scheduleAutoplay();
         });
         video.addEventListener('waiting', function () {
             if (config.pip) pipStats.stalls++;
+            // Reported by the heartbeat: a short wait (seeking) comes and goes between two ticks.
+            if (!stallSince && !video.paused && !video.ended) stallSince = Date.now();
         });
+        video.addEventListener('emptied', function () { stallSince = 0; });
         video.addEventListener('ratechange', function () {
             if (settingRate || adActive || Math.abs(video.playbackRate - config.speed) < 0.01) return;
             var rate = video.playbackRate;
@@ -1469,6 +1515,7 @@
         video.addEventListener('timeupdate', function () {
             if (adActive) fastForwardAd();
             else checkSponsorSegments(video);
+            if (stallSince && video.readyState >= 3) stallSince = 0;
         });
         applySpeed();
         // A page opened by autoplay may have loaded the video before this hook was attached.
@@ -2295,6 +2342,13 @@
         refreshLikeButtons: function () {
             likeCache = { id: '', value: null, at: 0 };
             markLikeButtons();
+        },
+        // The app opened a song's page itself (back from downloaded songs when the connection
+        // returned): start it although nobody tapped it, as after autoplay moved on.
+        autoStart: function () {
+            noteAdvance('app');
+            var v = hookedVideo || findVideo();
+            if (v) resumeAfterAdvance(v);
         },
         // YouTube Music after the app reloaded the page: play the song that was playing, from
         // where it was, through the player's own API (the page stays where it is). Reports

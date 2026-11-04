@@ -239,6 +239,12 @@ class BrowsePageController(
         fun onMusicQueue(json: String?) = Unit
 
         @JavascriptInterface
+        fun onMusicUpcoming(json: String?) = Unit
+
+        @JavascriptInterface
+        fun onVideoTopics(json: String?) = Unit
+
+        @JavascriptInterface
         fun onResumeResult(result: String?) = Unit
 
         // The page script does not report playback from this page; these keep the bridge

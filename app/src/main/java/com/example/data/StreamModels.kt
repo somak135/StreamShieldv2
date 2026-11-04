@@ -50,7 +50,11 @@ data class WebVideoState(
      * page's next track), "none" (nothing to play next). Empty if it has not happened.
      */
     val autoAdvance: String = "",
-    val autoAdvanceAt: Long = 0L
+    val autoAdvanceAt: Long = 0L,
+    /** Waiting for data since (ms since 1970); 0 if not waiting. */
+    val stallAt: Long = 0L,
+    /** Paused by the user (the page's own controls or the app's buttons). */
+    val pageUserPaused: Boolean = false
 ) {
     /** Best known duration: the player response's length, else the media element's. */
     val bestDurationSec: Int get() = if (lengthSec > 0) lengthSec else durationSec

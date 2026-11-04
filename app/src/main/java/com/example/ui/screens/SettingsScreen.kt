@@ -55,6 +55,9 @@ import com.example.data.formatCount
 import com.example.data.formatSpeedBadge
 import com.example.ui.BlockCounts
 import com.example.ui.AutoplayDiagnostics
+import com.example.ui.FallbackDiagnostics
+import com.example.offline.UpNextCache
+import androidx.compose.material.icons.filled.CloudOff
 import com.example.ui.StartDiagnostics
 import com.example.download.SmartDownloads
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -75,6 +78,9 @@ fun SettingsScreen(
     tapFixes: Pair<Int, String> = 0 to "",
     /** Autoplay while the app was hidden (this session). */
     autoplayDiagnostics: AutoplayDiagnostics = AutoplayDiagnostics(),
+    /** The up-next cache, and the last switch to downloaded songs (this session). */
+    upNextStats: UpNextCache.Stats = UpNextCache.Stats(),
+    fallbackDiagnostics: FallbackDiagnostics = FallbackDiagnostics(),
     onToggleAdBlock: (Boolean) -> Unit,
     onToggleSponsorSkip: (Boolean) -> Unit,
     onToggleBackgroundPlay: (Boolean) -> Unit,
@@ -88,6 +94,7 @@ fun SettingsScreen(
     onSetSmartSize: (Int) -> Unit,
     onRefreshSmart: () -> Unit,
     onResetDownloadQuality: (Boolean) -> Unit,
+    onToggleUpNextCache: (Boolean) -> Unit = {},
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
     onToggleAutoBackup: (Boolean) -> Unit,
@@ -158,6 +165,8 @@ fun SettingsScreen(
                         pipStats = pipStats,
                         tapFixes = tapFixes,
                         autoplay = autoplayDiagnostics,
+                        upNext = upNextStats,
+                        fallback = fallbackDiagnostics,
                         recentBlocked = recentBlocked,
                         showStartTime = preferences.showStartTime,
                         onToggleShowStartTime = onToggleShowStartTime
@@ -255,7 +264,8 @@ fun SettingsScreen(
                         preferences = preferences,
                         onSetSmartSize = onSetSmartSize,
                         onRefreshSmart = onRefreshSmart,
-                        onResetDownloadQuality = onResetDownloadQuality
+                        onResetDownloadQuality = onResetDownloadQuality,
+                        onToggleUpNextCache = onToggleUpNextCache
                     )
                 }
 
@@ -318,7 +328,8 @@ private fun DownloadsCard(
     preferences: ShieldPreferencesState,
     onSetSmartSize: (Int) -> Unit,
     onRefreshSmart: () -> Unit,
-    onResetDownloadQuality: (Boolean) -> Unit
+    onResetDownloadQuality: (Boolean) -> Unit,
+    onToggleUpNextCache: (Boolean) -> Unit
 ) {
     SettingsSectionCard(title = "Downloads") {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -377,6 +388,19 @@ private fun DownloadsCard(
             }
         }
         HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+        SettingToggleRow(
+            icon = Icons.Default.CloudOff,
+            iconTint = CyberCyan,
+            title = "Keep next songs ready",
+            subtitle = "While YouTube Music plays, its next ${UpNextCache.WINDOW} songs are downloaded (also on mobile data), " +
+                "so they play if the connection drops. Kept in the app's cache, at most " +
+                "${UpNextCache.CAP_BYTES / (1024 * 1024)} MB, emptied when the app is swiped away. " +
+                "Without a connection, downloaded songs play in any case.",
+            checked = preferences.upNextCacheEnabled,
+            onCheckedChange = onToggleUpNextCache,
+            testTag = "setting_up_next_cache_switch"
+        )
+        HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
         QualityLine("Video download quality", preferences.downloadVideoQuality) { onResetDownloadQuality(false) }
         QualityLine("Song download quality", preferences.downloadMusicQuality) { onResetDownloadQuality(true) }
         Text(
@@ -423,6 +447,8 @@ private fun DiagnosticsCard(
     pipStats: PipStats,
     tapFixes: Pair<Int, String>,
     autoplay: AutoplayDiagnostics,
+    upNext: UpNextCache.Stats,
+    fallback: FallbackDiagnostics,
     recentBlocked: List<String>,
     showStartTime: Boolean,
     onToggleShowStartTime: (Boolean) -> Unit
@@ -482,6 +508,7 @@ private fun DiagnosticsCard(
                 "queue" -> "YouTube Music's next track"
                 "player" -> "the page's next track"
                 "none" -> "nothing to play next"
+                "app" -> "back from downloaded songs"
                 else -> autoplay.method
             }
             val at = java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(java.util.Date(autoplay.methodAt))
@@ -489,6 +516,21 @@ private fun DiagnosticsCard(
         }
         if (autoplay.gapResult.isNotBlank()) {
             DiagnosticLine("Next video after one ended in the background", autoplay.gapResult)
+        }
+        if (upNext.songs > 0 || upNext.fetched > 0 || upNext.failed > 0) {
+            DiagnosticLine(
+                "Next songs ready (cache)",
+                String.format(Locale.US, "%d songs, %.1f MB", upNext.songs, upNext.bytes / (1024.0 * 1024.0))
+            )
+            DiagnosticLine("Next songs downloaded / failed", "${upNext.fetched} / ${upNext.failed}")
+        }
+        if (fallback.at > 0) {
+            val at = java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(java.util.Date(fallback.at))
+            DiagnosticLine(
+                "Downloaded songs instead of YouTube Music ($at)",
+                fallback.reason + (if (fallback.songs > 0) ", ${fallback.songs} songs" else "")
+            )
+            if (fallback.back.isNotBlank()) DiagnosticLine("Back to YouTube Music", fallback.back)
         }
         if (recentBlocked.isNotEmpty()) {
             Spacer(modifier = Modifier.height(10.dp))

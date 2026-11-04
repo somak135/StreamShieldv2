@@ -5,6 +5,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -41,6 +45,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
@@ -121,17 +130,38 @@ fun TopTabs(titles: List<String>, selected: Int, onSelect: (Int) -> Unit, modifi
     }
 }
 
-/** Chips row (YouTube Music's moods, …); [selected] is highlighted. */
+/**
+ * Chips row (YouTube Music's moods, Home's topics …); [selected] is highlighted and scrolled into
+ * view when it changes; [leading] comes first.
+ */
 @Composable
-fun ChipRow(titles: List<String>, selected: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+fun ChipRow(
+    titles: List<String>,
+    selected: Int,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    leading: (@Composable () -> Unit)? = null
+) {
+    val state = rememberLazyListState()
+    val offset = if (leading != null) 1 else 0
+    LaunchedEffect(selected, titles.size) {
+        if (selected < 0) return@LaunchedEffect
+        val index = selected + offset
+        val info = state.layoutInfo
+        val item = info.visibleItemsInfo.firstOrNull { it.index == index }
+        val fullyVisible = item != null && item.offset >= info.viewportStartOffset &&
+            item.offset + item.size <= info.viewportEndOffset
+        if (!fullyVisible) state.animateScrollToItem((index - 1).coerceAtLeast(0))
+    }
+    LazyRow(
+        state = state,
+        modifier = modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        titles.forEachIndexed { i, title ->
+        if (leading != null) item(key = "chip_leading") { leading() }
+        itemsIndexed(titles) { i, title ->
             val on = i == selected
             Text(
                 title,
@@ -164,7 +194,9 @@ fun FeedVideoCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     onChannelClick: (() -> Unit)? = null,
-    menu: List<MenuAction> = emptyList()
+    menu: List<MenuAction> = emptyList(),
+    /** Shown instead of the length, e.g. "LIVE" (red). */
+    badge: String = ""
 ) {
     Column(
         modifier = modifier
@@ -185,16 +217,20 @@ fun FeedVideoCard(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
-            val duration = formatDuration(durationSec)
+            val duration = badge.ifBlank { formatDuration(durationSec) }
             if (duration.isNotEmpty()) {
                 Text(
                     text = duration,
                     style = MaterialTheme.typography.labelSmall,
                     color = Color.White,
+                    fontWeight = if (badge.isNotBlank()) FontWeight.Bold else null,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(8.dp)
-                        .background(Color.Black.copy(alpha = 0.75f), RoundedCornerShape(4.dp))
+                        .background(
+                            if (badge.isNotBlank()) Color(0xFFCC0000) else Color.Black.copy(alpha = 0.75f),
+                            RoundedCornerShape(4.dp)
+                        )
                         .padding(horizontal = 4.dp, vertical = 1.dp)
                 )
             }
@@ -270,6 +306,14 @@ fun SearchScreen(
                 modifier = Modifier
                     .weight(1f)
                     .focusRequester(focus)
+                    // A hardware Enter searches on key up, and both halves stay here: run on key
+                    // down, the search screen closed and the key up "clicked" a Home chip.
+                    .onPreviewKeyEvent { e ->
+                        if (e.key == Key.Enter || e.key == Key.NumPadEnter) {
+                            if (e.type == KeyEventType.KeyUp && query.isNotBlank()) onSearch(query)
+                            true
+                        } else false
+                    }
                     .testTag("search_screen_input")
             )
         }
