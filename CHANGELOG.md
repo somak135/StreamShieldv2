@@ -7,6 +7,15 @@ Releases are published from version tags: <https://github.com/streamshield-app/S
 In [somak135/StreamShieldv2](https://github.com/somak135/StreamShieldv2) after `c6f91f2` (the fork
 keeps its application id `com.aistudio.streamshield.vytkzp`):
 
+- **Videos continue where you stopped, wherever you open them** (`data/ResumeRule.kt`, agreed
+  rule), as in the YouTube app: from search results, Home and its chips, Subs, channel and
+  playlist pages, shared links, and related videos tapped in the player page, not only from
+  History. A video resumes if you watched at least 10 s and stopped before 90 % and more than
+  10 s before its end; music, Shorts and live streams start from the beginning, and links that
+  name a time keep it. Autoplay, mixes and playlists moving on (and the player's next button)
+  start at 0:00. The app adds YouTube's `t=` to the links it opens; in the player page,
+  shield.js notes the tapped video link and asks the app (`resumeAt`) once the URL changes to
+  it, then seeks when that video has loaded.
 - **Home's chip row like the YouTube app** (`recommend/HomeChipRule.kt`, agreed rule): the 4
   tabs became a scrolling row of chips with an Explore button: All (For you) · Subs · YouTube's
   topic pages you watch most · your topics · the other topic pages · Recently uploaded · Watched
@@ -67,7 +76,7 @@ keeps its application id `com.aistudio.streamshield.vytkzp`):
   Close; while the app is hidden they are closed too if one could hold playback (autoplay just
   moved on, or the page paused the song).
 - Tests: `MusicForYouRuleTest`, `MusicShelvesTest`, `FallbackRuleTest`, `HomeChipRuleTest`,
-  `YouTubeDestinationsTest`; shield.js tests for the
+  `YouTubeDestinationsTest`, `ResumeRuleTest`; shield.js tests for the
   new prompts, YouTube Music queues, the upcoming songs, waiting for data and starting a page the
   app opened.
 

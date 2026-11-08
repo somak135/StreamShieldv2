@@ -58,6 +58,7 @@ import com.example.recommend.HomeChipRule
 import com.example.recommend.HomeTopics
 import com.example.recommend.YouTubeDestinations
 import com.example.data.formatAgo
+import com.example.data.ResumeRule
 import com.example.data.formatCount
 import com.example.offline.FallbackRule
 import com.example.offline.FallbackTrigger
@@ -540,6 +541,10 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     val tapFixes: StateFlow<TapFixInfo> = _tapFixes.asStateFlow()
     private var pageTapFixes = 0
 
+    /** Where each watched video was left (newest history entry per video), for ResumeRule. */
+    @Volatile
+    private var resumePoints: Map<String, WatchedVideo> = emptyMap()
+
     private val _autoplayDiagnostics = MutableStateFlow(AutoplayDiagnostics())
     val autoplayDiagnostics: StateFlow<AutoplayDiagnostics> = _autoplayDiagnostics.asStateFlow()
 
@@ -663,6 +668,10 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             refreshForYou(force = false)
         }
         viewModelScope.launch(Dispatchers.IO) { musicForYou.load() }
+        viewModelScope.launch {
+            // Newest first: reversed, so the newest entry of a video wins.
+            library.history(500).collect { list -> resumePoints = list.asReversed().associateBy { it.videoId } }
+        }
         // The up-next cache starts empty (left over if the app was killed); then follow the
         // connection and YouTube Music's playback.
         viewModelScope.launch(Dispatchers.IO) { UpNextCache.clearDir(getApplication()) }
@@ -1251,6 +1260,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         switchToWebPlayback()
         _showSettings.value = false
         val id = extractYouTubeVideoId(url)
+        val target = withResume(url)
         if (id != null && isYouTubeVideoPage(url) && id != _videoState.value.videoId) {
             val known = knownVideo(id)
             pendingVideoJob?.cancel()
@@ -1259,8 +1269,32 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             schedulePendingClear(PENDING_MAX_MS)
         }
         _playerExpanded.value = true
-        _webPageUrl.value = url
-        _openUrlRequests.tryEmit(url)
+        _webPageUrl.value = target
+        _openUrlRequests.tryEmit(target)
+    }
+
+    /**
+     * [url] continuing where you stopped, when you open a partly watched video (ResumeRule): the
+     * history's position, or the playing position if it is the video on screen. Links that name
+     * a time, Shorts, live streams and YouTube Music are left as they are.
+     */
+    private fun withResume(url: String): String {
+        if (!ResumeRule.isWatchLink(url) || ResumeRule.hasStartTime(url)) return url
+        val id = extractYouTubeVideoId(url) ?: return url
+        val live = _videoState.value
+        val sec = if (live.videoId == id && _playbackSource.value == PlaybackSource.WEB && live.positionSec > 0) {
+            val duration = live.bestDurationSec
+            ResumeRule.resumeAt(live.positionSec, duration, if (duration > 0) live.positionSec.toFloat() / duration else 0f, live.isMusic)
+        } else {
+            resumeAtFor(id)
+        }
+        return if (sec > 0) ResumeRule.withStart(url, sec) else url
+    }
+
+    /** Where [videoId] continues if opened again (0: the start); also asked by the page (bridge thread). */
+    fun resumeAtFor(videoId: String): Int {
+        val w = resumePoints[videoId] ?: return 0
+        return ResumeRule.resumeAt(w.positionSec, w.durationSec, w.watchedFraction, w.isMusic)
     }
 
     /** Title and channel of a video the app already lists somewhere (For you, feed, history). */

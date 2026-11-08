@@ -310,6 +310,13 @@ and `returnToYouTubeMusic` opens the queue's next song (`webStartRequests` →
 switch lasts, YouTube Music starting by itself is paused again (`webPauseRequests`) unless its page
 is on screen; anything the user opens on YouTube ends the switch (`switchToWebPlayback`).
 
+**Continuing where you stopped** (`data/ResumeRule.kt`). The view model keeps the newest
+history entry per video (`resumePoints`). `openInPlayer` adds YouTube's `t=` to a watch link
+that has no time (`withResume`); in the player page, a tapped video link is noted by shield.js
+(`noteTappedVideo`), and when the URL changes to that video it asks `resumeAt` and seeks once
+the new video has loaded (`pendingSeek` with `afterLoad`). Autoplay and the player's next
+button never tap a video link, so they start at 0:00.
+
 **Playback source.** `StreamShieldViewModel.playbackSource` is WEB or OFFLINE. The active player
 reports `WebVideoState` and takes the media buttons (`PlaybackCommands`); the mini-player,
 notification, PiP and history work the same for both.
@@ -434,7 +441,7 @@ button, calls `onHideCustomView`.
   `recommend/ForYouRuleTest.kt` cover the two reviewed rules, `recommend/MusicForYouRuleTest.kt`
   the music rule, `offline/FallbackRuleTest.kt` the switch to downloaded songs,
   `recommend/HomeChipRuleTest.kt` Home's chips and `recommend/YouTubeDestinationsTest.kt` reading
-  YouTube's topic pages.
+  YouTube's topic pages, `data/ResumeRuleTest.kt` where opened videos continue.
 - `tools/shield-js-test/shield.test.mjs` runs `shield.js` in headless Chromium against mock
   YouTube pages. It covers pruning, the ad fallback, background-play events, speed, SponsorBlock,
   PiP layout, page routing, the heartbeat, play/pause tap fixes, Subscribe and Like / Dislike

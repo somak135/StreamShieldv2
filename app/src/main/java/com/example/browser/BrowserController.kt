@@ -456,6 +456,10 @@ class BrowserController(
         @JavascriptInterface
         fun likeState(videoId: String?): String = viewModel.pageLikeState(videoId.orEmpty())
 
+        /** Where a video tapped in the page continues (seconds, 0: the start; ResumeRule). */
+        @JavascriptInterface
+        fun resumeAt(videoId: String?): Int = viewModel.resumeAtFor(videoId.orEmpty())
+
         /** YouTube Music's queue for a song (for the Music tab's For you); parsed on this thread. */
         @JavascriptInterface
         fun onMusicQueue(json: String?) {

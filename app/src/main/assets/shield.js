@@ -586,6 +586,7 @@
 
     function onUrlChanged() {
         setTimeout(endNavFade, 80);
+        try { maybeResumeTapped(); } catch (e) {}
         if (!diag) return;
         var id = currentVideoId();
         if (id === diag.videoId) return;   // same video (e.g. a replaceState adding &t=)
@@ -841,6 +842,8 @@
             report('onOpenBrowse', link.url);
         } else if (isBrowsePage() && !link.video) {
             startNavFade();
+        } else if (!isBrowsePage() && link.video) {
+            noteTappedVideo(link.url);
         }
     }, true);
 
@@ -2218,7 +2221,8 @@
         if (document.documentElement) document.documentElement.classList.remove('ss-nav');
     }
 
-    // ---- YouTube Music: resume a song after the app reloaded the page -----------------------
+    // ---- Seeking once a video is there: YouTube Music after the app reloaded the page, and a
+    // video tapped in the player page continuing where it was left (below) ---------------------
     var pendingSeek = null;
 
     function applyPendingSeek() {
@@ -2226,9 +2230,51 @@
         if (Date.now() > pendingSeek.until) { pendingSeek = null; return; }
         var v = findVideo();
         var id = currentVideoId() || (details && details.videoId) || '';
-        if (!v || id !== pendingSeek.id || v.readyState < 1) return;
+        if (!v || id !== pendingSeek.id || v.readyState < 1 || adActive) return;
+        // After an in-page tap the URL changes before the player has the new video: seek only
+        // once it loaded since then (or its length is the new video's), not the old one.
+        if (pendingSeek.afterLoad && !(lastLoadAt > pendingSeek.since || holdsVideo(v, pendingSeek.id))) return;
         try { v.currentTime = pendingSeek.pos; } catch (e) {}
         pendingSeek = null;
+    }
+
+    function holdsVideo(v, id) {
+        if (!details || details.videoId !== id || !details.lengthSeconds || !isFinite(v.duration)) return false;
+        return Math.abs(v.duration - details.lengthSeconds) <= 2;
+    }
+
+    // A video tapped in the player page (related videos, a playlist's entries, ...) continues
+    // where it was left, as videos the app opens do (the app adds &t= to their link). Only the
+    // video whose link was tapped: autoplay, mixes and playlists moving on, and the player's next
+    // button, start at 0:00. The app answers with ResumeRule (0: from the start).
+    var RESUME_TAP_MS = 15000;
+    var RESUME_WAIT_MS = 20000;
+    var tappedVideo = { id: '', at: 0 };
+
+    function noteTappedVideo(url) {
+        var u;
+        try { u = new URL(url, location.href); } catch (e) { return; }
+        var id = u.pathname === '/watch' ? (u.searchParams.get('v') || '') : '';
+        // A link that names a time (e.g. a timestamp in a comment) keeps it.
+        if (u.searchParams.has('t') || u.searchParams.has('start')) id = '';
+        tappedVideo = { id: id, at: id ? Date.now() : 0 };
+    }
+
+    function maybeResumeTapped() {
+        if (!tappedVideo.id || isBrowsePage() || isMusicSite()) return;
+        var id = currentVideoId();
+        if (id !== tappedVideo.id) return;
+        var recent = Date.now() - tappedVideo.at <= RESUME_TAP_MS;
+        tappedVideo = { id: '', at: 0 };
+        if (!recent || location.pathname !== '/watch' || /[?&](t|start)=/.test(location.search)) return;
+        var at = 0;
+        try {
+            if (bridge && typeof bridge.resumeAt === 'function') at = Number(bridge.resumeAt(id)) || 0;
+        } catch (e) {}
+        if (at <= 0) return;
+        var now = Date.now();
+        pendingSeek = { id: id, pos: at, until: now + RESUME_WAIT_MS, since: now, afterLoad: true };
+        applyPendingSeek();
     }
 
     if (document.readyState === 'loading') {

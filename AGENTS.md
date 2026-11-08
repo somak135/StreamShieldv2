@@ -189,6 +189,10 @@ installs on a phone over USB.
   (`playbackMayBeHeld`), to keep the background heartbeat cheap.
 - **Like / Dislike buttons** follow the Subscribe pattern (capture-phase stop, sync state call).
   Comments have Like buttons too ("Like this comment …"); they must stay YouTube's.
+- **Resuming a video tapped in the player page.** YouTube changes the URL (pushState) before
+  the player holds the new video, so a seek at that moment lands on the old one; `pendingSeek`
+  with `afterLoad` waits for `loadedmetadata` after the URL change (or a matching length). Only
+  the video whose link was tapped resumes, so autoplay and mixes start at 0:00.
 - **Downloaded songs when the connection is gone.** Two clocks: `FallbackRule.trigger` uses ms
   since 1970 (the page's `stallAt`), `mayReturn` elapsed realtime (`NetworkMonitor.changedAt`).
   Android's "validated" network does not see a weak signal, hence the timeouts and the 5-minute

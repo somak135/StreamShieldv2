@@ -142,7 +142,8 @@ function bridgeInit(config) {
       onMusicQueue: function (j) { window.__bridgeLog.push(['musicQueue', JSON.parse(j)]); },
       onMusicUpcoming: function (j) { window.__bridgeLog.push(['musicUpcoming', JSON.parse(j)]); },
       onVideoTopics: function (j) { window.__bridgeLog.push(['topics', JSON.parse(j)]); },
-      likeState: function (id) { return (window.__likeStates && window.__likeStates[id]) || ''; }
+      likeState: function (id) { return (window.__likeStates && window.__likeStates[id]) || ''; },
+      resumeAt: function (id) { return (window.__resumeAt && window.__resumeAt[id]) || 0; }
     };`;
 }
 
@@ -1524,6 +1525,41 @@ console.log('Resume after reload (YouTube Music)');
     await sleep(200);
     const t = await page.evaluate(() => document.querySelector('video').currentTime);
     check('seekWhenReady seeks once the video is there', Math.abs(t - 12) < 0.6, t);
+    await context.close();
+}
+
+// ---------------------------------------------------------------------------------------------
+console.log('A video tapped in the player page continues where it was left');
+{
+    const { context, page } = await openWatchPage();
+    // YouTube changes the URL itself after the tap (no page load), then loads the next video.
+    const navigate = async (path, tap) => page.evaluate(async ({ path, tap }) => {
+        const v = document.querySelector('video');
+        v.pause();
+        if (tap) {
+            const a = document.getElementById('videoLink');
+            a.setAttribute('href', path);
+            a.addEventListener('click', (e) => e.preventDefault(), { once: true });
+            document.getElementById('videoLinkTitle').click();
+            await new Promise((r) => setTimeout(r, 300));
+        }
+        const before = v.currentTime;
+        history.pushState({}, '', path);
+        await new Promise((r) => setTimeout(r, 50));
+        const atUrlChange = v.currentTime;             // the old video must not be seeked
+        v.currentTime = 0;
+        v.dispatchEvent(new Event('loadedmetadata'));   // the tapped video is there
+        await new Promise((r) => setTimeout(r, 300));
+        return { before, atUrlChange, t: v.currentTime };
+    }, { path, tap });
+    await page.evaluate(() => { window.__resumeAt = { other123456: 12, yyyyyyyyyyy: 12, zzzzzzzzzzz: 12 }; });
+    const tapped = await navigate('/watch?v=other123456', true);
+    check('a tapped video continues where it was left, once it is there', Math.abs(tapped.t - 12) < 0.6 &&
+        Math.abs(tapped.atUrlChange - tapped.before) < 0.2, tapped);
+    const auto = await navigate('/watch?v=yyyyyyyyyyy', false);
+    check('autoplay moving on (no tap) starts from the beginning', auto.t < 1, auto);
+    const timed = await navigate('/watch?v=zzzzzzzzzzz&t=3s', true);
+    check('a link that names a time keeps it (no resume)', timed.t < 1, timed);
     await context.close();
 }
 
