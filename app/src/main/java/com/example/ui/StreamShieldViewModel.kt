@@ -59,6 +59,10 @@ import com.example.recommend.HomeTopics
 import com.example.recommend.YouTubeDestinations
 import com.example.data.formatAgo
 import com.example.data.ResumeRule
+import com.example.data.SleepRule
+import coil.imageLoader
+import coil.request.CachePolicy
+import coil.request.ImageRequest
 import com.example.data.formatCount
 import com.example.offline.FallbackRule
 import com.example.offline.FallbackTrigger
@@ -105,6 +109,15 @@ const val MUSIC_HOME_URL = "https://music.youtube.com"
 private const val YTM_HOME_TTL_MS = 60L * 60 * 1000
 /** Pages of YouTube Music's home shelves loaded as the music home is scrolled. */
 private const val YTM_MAX_PAGES = 6
+/** "Still watching?" after this many minutes without a touch in the app (agreed: 45). */
+private const val STILL_WATCHING_DEFAULT_MIN = 45
+/** Fast start: thumbnails of each list's first cards kept ready, and the player page warmed up. */
+private const val PREFETCH_PER_LIST = 12
+private const val WARM_UP_DELAY_MS = 4_000L
+private const val YTM_HOME_FILE = "ytm_home.json"
+/** Typing pause before search suggestions are asked for, and how many are shown. */
+private const val SUGGEST_DELAY_MS = 200L
+private const val MAX_SUGGESTIONS = 10
 /** Home's chip row is built again at most this often (and on pull-down). */
 private const val HOME_CHIPS_TTL_MS = 10L * 60 * 1000
 /** A topic page's list (YouTube's Music, Gaming, ... page) is loaded again after this. */
@@ -174,6 +187,17 @@ data class DownloadSheetState(
 
 /** YouTube Music's songs from the current one on (the current song first), from the page. */
 data class Upcoming(val listId: String, val songs: List<QueueSong>)
+
+/** [setSleepTimer]'s value for "at the end of this video / song". */
+const val SLEEP_END_OF_VIDEO = -1
+
+/** The sleep timer: pauses at [endsAt] (elapsed realtime), or at the end of [videoId] if [endOfVideo]. */
+data class SleepTimer(val endsAt: Long = 0L, val endOfVideo: Boolean = false, val videoId: String = "") {
+    val active: Boolean get() = endsAt > 0L || endOfVideo
+}
+
+/** Suggestions for what is typed in a search screen ([music]: YouTube Music's search). */
+data class SearchSuggestions(val query: String = "", val music: Boolean = false, val items: List<String> = emptyList())
 
 /** A topic or topic-page chip's list on Home ([key]: [HomeChip.key]). */
 data class ChipFeedState(
@@ -486,6 +510,12 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     private var ytmPages = 0
     private var ytmJob: Job? = null
 
+    // ---- fast start: thumbnails ready, player page warmed up ----
+    private val prefetchedImages: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val _warmUpRequests = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    /** A YouTube page without a video to load in the (still empty) player page, a few seconds after start. */
+    val warmUpRequests: SharedFlow<String> = _warmUpRequests
+
     // ---- pull-down on web pages ----
     private val _webPull = MutableStateFlow<WebPull?>(null)
     val webPull: StateFlow<WebPull?> = _webPull.asStateFlow()
@@ -588,6 +618,22 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     private val _fallbackDiagnostics = MutableStateFlow(FallbackDiagnostics())
     val fallbackDiagnostics: StateFlow<FallbackDiagnostics> = _fallbackDiagnostics.asStateFlow()
 
+    // ---- sleep protection (SleepRule): the sleep timer and "Still watching?" ----
+    private val _sleepTimer = MutableStateFlow(SleepTimer())
+    val sleepTimer: StateFlow<SleepTimer> = _sleepTimer.asStateFlow()
+    private val _sleepLabel = MutableStateFlow("")
+    /** While the sleep timer runs: "23 min", or "end" (at the end of the video / song); else "". */
+    val sleepLabel: StateFlow<String> = _sleepLabel.asStateFlow()
+    private val _showSleepSheet = MutableStateFlow(false)
+    val showSleepSheet: StateFlow<Boolean> = _showSleepSheet.asStateFlow()
+    /** Last touch or key in the app, or media button (elapsed realtime). */
+    @Volatile
+    private var lastActivityAt = android.os.SystemClock.elapsedRealtime()
+    private var stillAskedAt = 0L
+    private val _stillWatching = MutableStateFlow(0L)
+    /** While "Still watching?" is asked: when playback pauses without an answer (elapsed realtime); else 0. */
+    val stillWatching: StateFlow<Long> = _stillWatching.asStateFlow()
+
     // Most recent blocked requests (host + path), newest first.
     private val _recentBlocked = MutableStateFlow<List<String>>(emptyList())
     val recentBlocked: StateFlow<List<String>> = _recentBlocked.asStateFlow()
@@ -627,6 +673,8 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         }
         viewModelScope.launch {
             PlaybackCommands.flow.collect { command ->
+                // Notification, lock screen, headset and the app's own buttons: someone is there.
+                noteUserActivity()
                 // The user paused or stopped from the notification: no more "playing" between videos.
                 if (command == PlaybackCommand.PAUSE || command == PlaybackCommand.STOP ||
                     command == PlaybackCommand.TOGGLE
@@ -672,6 +720,32 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             // Newest first: reversed, so the newest entry of a video wins.
             library.history(500).collect { list -> resumePoints = list.asReversed().associateBy { it.videoId } }
         }
+        // Fast start: YouTube Music's shelves from the last start at once; the first thumbnails
+        // of each list downloaded ahead; the player page warmed up with the site used last.
+        viewModelScope.launch(Dispatchers.IO) { restoreYtmHome() }
+        viewModelScope.launch {
+            forYou.state.map { st -> st.items.take(PREFETCH_PER_LIST).map { "https://i.ytimg.com/vi/${it.videoId}/hq720.jpg" } }
+                .distinctUntilChanged().collect { prefetchImages(it) }
+        }
+        viewModelScope.launch {
+            musicForYou.state.map { st -> st.items.take(PREFETCH_PER_LIST).map { "https://i.ytimg.com/vi/${it.videoId}/hqdefault.jpg" } }
+                .distinctUntilChanged().collect { prefetchImages(it) }
+        }
+        viewModelScope.launch {
+            _ytmHome.map { st -> st.shelves.take(2).flatMap { it.items.take(PREFETCH_PER_LIST / 2) }.map { it.thumbnailUrl } }
+                .distinctUntilChanged().collect { prefetchImages(it) }
+        }
+        viewModelScope.launch {
+            delay(WARM_UP_DELAY_MS)
+            if (!network.online.value || !_appVisible.value) return@launch
+            val music = try {
+                withContext(Dispatchers.IO) { library.recentHistory(1).firstOrNull()?.isMusic == true }
+            } catch (_: Exception) {
+                false
+            }
+            // Pages without a video (sign-in prompts), which load the site's scripts.
+            _warmUpRequests.tryEmit(if (music) "$MUSIC_HOME_URL/library" else "$HOME_URL/feed/library")
+        }
         // The up-next cache starts empty (left over if the app was killed); then follow the
         // connection and YouTube Music's playback.
         viewModelScope.launch(Dispatchers.IO) { UpNextCache.clearDir(getApplication()) }
@@ -680,6 +754,8 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             while (true) {
                 delay(1_000L)
                 fallbackTick()
+                sleepTick()
+                stillWatchingTick()
             }
         }
         viewModelScope.launch { network.online.collect { online -> if (online) refreshUpNext() } }
@@ -823,6 +899,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
 
         // Before the notification update: going back to YouTube Music changes the source.
         trackForFallback(state)
+        sleepAtEnd(state)
 
         syncBackgroundService(state)
     }
@@ -1353,6 +1430,52 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         _browseTab.value = null
     }
 
+    // ---- search suggestions (as the apps show them while typing) ------------------------------
+    private val _searchSuggestions = MutableStateFlow(SearchSuggestions())
+    val searchSuggestions: StateFlow<SearchSuggestions> = _searchSuggestions.asStateFlow()
+    private var suggestJob: Job? = null
+    private val suggestCache = object : LinkedHashMap<String, List<String>>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<String>>?): Boolean = size > 64
+    }
+
+    /** What is typed in a search screen changed: suggestions after a short pause (cached). */
+    fun onSearchQuery(query: String, music: Boolean) {
+        val q = query.trim()
+        suggestJob?.cancel()
+        if (q.isEmpty() || youTubeLinkOrNull(q) != null) {
+            _searchSuggestions.value = SearchSuggestions(q, music)
+            return
+        }
+        val key = (if (music) "m:" else "y:") + q.lowercase()
+        synchronized(suggestCache) { suggestCache[key] }?.let {
+            _searchSuggestions.value = SearchSuggestions(q, music, it)
+            return
+        }
+        suggestJob = viewModelScope.launch {
+            delay(SUGGEST_DELAY_MS)
+            val items = withContext(Dispatchers.IO) { fetchSuggestions(q, music) }
+            if (items.isNotEmpty()) synchronized(suggestCache) { suggestCache[key] = items }
+            _searchSuggestions.value = SearchSuggestions(q, music, items)
+        }
+    }
+
+    /** Blocking: YouTube Music's own suggestions for its search (else YouTube's), YouTube's otherwise. */
+    private fun fetchSuggestions(query: String, music: Boolean): List<String> {
+        if (music) {
+            try {
+                YouTubeMusicHome.suggestions(query).takeIf { it.isNotEmpty() }?.let { return it.take(MAX_SUGGESTIONS) }
+            } catch (e: Exception) {
+                android.util.Log.w("StreamShield", "YouTube Music suggestions", e)
+            }
+        }
+        return try {
+            NewPipeSupport.searchSuggestions(query).take(MAX_SUGGESTIONS)
+        } catch (e: Exception) {
+            android.util.Log.w("StreamShield", "YouTube suggestions", e)
+            emptyList()
+        }
+    }
+
     /** Search box: a pasted YouTube link opens directly, anything else is a YouTube search. */
     fun search(query: String) {
         val q = query.trim()
@@ -1740,6 +1863,43 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     // ---- YouTube Music's own home shelves --------------------------------------------------
 
     /** Loads YouTube Music's home (or the selected chip's), unless loaded within the hour. */
+    private fun ytmHomeFile() = File(getApplication<Application>().filesDir, YTM_HOME_FILE)
+
+    /** YouTube Music's shelves as kept at the last load (refreshed when the Music tab opens). */
+    private fun restoreYtmHome() {
+        val text = try {
+            ytmHomeFile().takeIf { it.exists() }?.readText()
+        } catch (_: Exception) {
+            null
+        } ?: return
+        val saved = YouTubeMusicHome.restore(text) ?: return
+        _ytmHome.update { if (it.shelves.isEmpty() && it.selected.isBlank()) it.copy(chips = it.chips.ifEmpty { saved.chips }, shelves = saved.shelves) else it }
+    }
+
+    private fun saveYtmHome() {
+        try {
+            val file = ytmHomeFile()
+            val tmp = File(file.parentFile, "$YTM_HOME_FILE.tmp")
+            tmp.writeText(YouTubeMusicHome.save(_ytmHome.value))
+            if (!tmp.renameTo(file)) {
+                file.writeText(tmp.readText())
+                tmp.delete()
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Downloads [urls] into the image cache (not memory) once each, so they show at once later. */
+    private fun prefetchImages(urls: List<String>) {
+        if (!network.online.value) return
+        val app = getApplication<Application>()
+        val loader = app.imageLoader
+        for (url in urls) {
+            if (url.isBlank() || !prefetchedImages.add(url)) continue
+            loader.enqueue(ImageRequest.Builder(app).data(url).memoryCachePolicy(CachePolicy.DISABLED).build())
+        }
+    }
+
     fun loadYtmHome(force: Boolean) {
         val current = _ytmHome.value
         if (!force && (current.loading || (current.shelves.isNotEmpty() &&
@@ -1762,6 +1922,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
                         loadedAt = System.currentTimeMillis()
                     )
                 }
+                if (chip.isBlank()) saveYtmHome()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -2048,6 +2209,113 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         fallbackPlayed.clear()
         fallbackQueue = emptyList()
         fallbackListId = ""
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Sleep protection (SleepRule): the sleep timer, and "Still watching?" after a long time
+    // without a touch in the app
+    // ---------------------------------------------------------------------------------------
+
+    fun openSleepSheet() {
+        _showSleepSheet.value = true
+    }
+
+    fun dismissSleepSheet() {
+        _showSleepSheet.value = false
+    }
+
+    /** [minutes] > 0: pause after that long; [SLEEP_END_OF_VIDEO]: at the end of what plays; 0: off. */
+    fun setSleepTimer(minutes: Int) {
+        _showSleepSheet.value = false
+        val playing = _videoState.value
+        val timer = when {
+            minutes == SLEEP_END_OF_VIDEO -> SleepTimer(endOfVideo = true, videoId = playing.videoId)
+            minutes > 0 -> SleepTimer(endsAt = android.os.SystemClock.elapsedRealtime() + minutes * SleepRule.MINUTE_MS)
+            else -> SleepTimer()
+        }
+        _sleepTimer.value = timer
+        updateSleepLabel()
+        showBanner(
+            when {
+                !timer.active -> "Sleep timer off"
+                timer.endOfVideo -> "Sleep timer: pauses at the end of this ${if (playing.isMusic) "song" else "video"}"
+                minutes >= 60 && minutes % 60 == 0 -> "Sleep timer: pauses in ${minutes / 60} h"
+                else -> "Sleep timer: pauses in $minutes min"
+            }
+        )
+    }
+
+    private fun updateSleepLabel() {
+        val t = _sleepTimer.value
+        val label = when {
+            t.endOfVideo -> "end"
+            t.endsAt > 0L -> "${SleepRule.minutesLeft(android.os.SystemClock.elapsedRealtime(), t.endsAt)} min"
+            else -> ""
+        }
+        if (_sleepLabel.value != label) _sleepLabel.value = label
+    }
+
+    private fun sleepTick() {
+        val t = _sleepTimer.value
+        if (t.endsAt > 0L && android.os.SystemClock.elapsedRealtime() >= t.endsAt) {
+            pauseForSleep("Sleep timer: paused")
+        } else if (t.endsAt > 0L) {
+            updateSleepLabel()
+        }
+    }
+
+    /** An end-of-video timer: with each state of the playing video or song. */
+    private fun sleepAtEnd(state: WebVideoState) {
+        val t = _sleepTimer.value
+        if (!t.endOfVideo || state.videoId.isBlank()) return
+        if (t.videoId.isBlank()) {
+            // Set while nothing played: the first video or song that plays.
+            _sleepTimer.value = t.copy(videoId = state.videoId)
+        } else if (SleepRule.endReached(t.videoId, state.videoId, state.ended)) {
+            pauseForSleep("Sleep timer: paused at the end")
+        }
+    }
+
+    private fun pauseForSleep(message: String) {
+        _sleepTimer.value = SleepTimer()
+        _sleepLabel.value = ""
+        PlaybackCommands.send(PlaybackCommand.PAUSE)
+        showBannerFor(message, 4000L)
+    }
+
+    /** A touch or key in the app (MainActivity.onUserInteraction), or a media button. */
+    fun noteUserActivity() {
+        lastActivityAt = android.os.SystemClock.elapsedRealtime()
+    }
+
+    private fun stillWatchingTick() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val deadline = _stillWatching.value
+        if (deadline > 0L) {
+            if (now < deadline) return
+            _stillWatching.value = 0L
+            if (SleepRule.pauseUnanswered(now, deadline, stillAskedAt, lastActivityAt)) {
+                lastActivityAt = now
+                PlaybackCommands.send(PlaybackCommand.PAUSE)
+                showBannerFor("Paused: nobody answered \"Still watching?\"", 5000L)
+            }
+            return
+        }
+        if (SleepRule.shouldAsk(now, lastActivityAt, preferences.value.stillWatchingMinutes, _videoState.value.isPlaying, asking = false)) {
+            stillAskedAt = now
+            _stillWatching.value = now + SleepRule.ANSWER_MS
+        }
+    }
+
+    /** "Still watching?" answered: keep playing, or pause. */
+    fun answerStillWatching(keepPlaying: Boolean) {
+        _stillWatching.value = 0L
+        lastActivityAt = android.os.SystemClock.elapsedRealtime()
+        if (!keepPlaying) PlaybackCommands.send(PlaybackCommand.PAUSE)
+    }
+
+    fun toggleStillWatching(enabled: Boolean) {
+        viewModelScope.launch { prefsRepo.setStillWatching(if (enabled) STILL_WATCHING_DEFAULT_MIN else 0) }
     }
 
     fun toggleUpNextCache(enabled: Boolean) {

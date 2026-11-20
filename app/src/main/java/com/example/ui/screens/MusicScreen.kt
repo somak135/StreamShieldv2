@@ -101,6 +101,9 @@ fun MusicScreen(
     /** A video (not a song) is playing: opening YouTube Music's home stops it. */
     videoPlaying: Boolean,
     onSearch: (String) -> Unit,
+    /** Suggestions for what is typed in the search, and each change of it. */
+    searchSuggestions: List<String> = emptyList(),
+    onSearchQuery: (String) -> Unit = {},
     onOpenYouTubeMusic: () -> Unit,
     onPlaySong: (videoId: String) -> Unit,
     onPlayRadio: (videoId: String) -> Unit,
@@ -292,7 +295,9 @@ fun MusicScreen(
                     searching = false
                     onSearch(q)
                 },
-                onClose = { searching = false }
+                onClose = { searching = false },
+                suggestions = searchSuggestions,
+                onQueryChange = onSearchQuery
             )
         }
     }

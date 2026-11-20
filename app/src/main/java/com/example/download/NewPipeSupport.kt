@@ -140,6 +140,15 @@ object NewPipeSupport {
             .mapNotNull { item -> (item as? StreamInfoItem)?.let(::toRelatedVideo) }
     }
 
+    /**
+     * Blocking network call: YouTube's search suggestions for what was typed so far (YouTube's
+     * suggestion service, as the YouTube app uses while typing).
+     */
+    fun searchSuggestions(query: String): List<String> {
+        ensureInit()
+        return ServiceList.YouTube.suggestionExtractor.suggestionList(query).orEmpty().filter { it.isNotBlank() }
+    }
+
     /** A plain video or finished live stream as a [RelatedVideo]; null for live streams. */
     private fun toRelatedVideo(stream: StreamInfoItem): RelatedVideo? {
         if (stream.streamType != StreamType.VIDEO_STREAM && stream.streamType != StreamType.POST_LIVE_STREAM) return null

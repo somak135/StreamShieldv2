@@ -112,6 +112,8 @@ import com.example.ui.MUSIC_HOME_URL
 import com.example.ui.StreamShieldViewModel
 import com.example.ui.components.AppNavigationBar
 import com.example.ui.components.MiniPlayer
+import com.example.ui.components.SleepTimerSheet
+import com.example.data.SleepRule
 import com.example.ui.components.TabsScaffold
 import com.example.ui.components.VideoActionsSheet
 import com.example.ui.components.PlaybackSpeedBottomSheet
@@ -188,6 +190,8 @@ class MainActivity : ComponentActivity() {
         // continues with its next song once the connection is back.
         lifecycleScope.launch { viewModel.webPauseRequests.collect { browser.pause() } }
         lifecycleScope.launch { viewModel.webStartRequests.collect { url -> browser.loadAndStart(url) } }
+        // Fast start: the player page loads the site used last (no video) a few seconds after start.
+        lifecycleScope.launch { viewModel.warmUpRequests.collect { url -> browser.warmUp(url) } }
         // After the collectors above: a shared link is loaded through them.
         handleIncomingIntent(intent)
 
@@ -278,6 +282,12 @@ class MainActivity : ComponentActivity() {
     // ---------------------------------------------------------------------------------------
     // Picture-in-picture
     // ---------------------------------------------------------------------------------------
+
+    /** Any touch or key in the app: someone is there ("Still watching?" counts from here). */
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        viewModel.noteUserActivity()
+    }
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
@@ -481,6 +491,10 @@ fun StreamShieldApp(
     val homeChips by viewModel.homeChips.collectAsStateWithLifecycle()
     val homeChip by viewModel.homeChip.collectAsStateWithLifecycle()
     val chipFeed by viewModel.chipFeed.collectAsStateWithLifecycle()
+    val searchSuggestions by viewModel.searchSuggestions.collectAsStateWithLifecycle()
+    val sleepLabel by viewModel.sleepLabel.collectAsStateWithLifecycle()
+    val showSleepSheet by viewModel.showSleepSheet.collectAsStateWithLifecycle()
+    val stillWatching by viewModel.stillWatching.collectAsStateWithLifecycle()
     val homeRefreshing by viewModel.homeRefreshing.collectAsStateWithLifecycle()
     val musicForYouState by viewModel.musicForYouState.collectAsStateWithLifecycle()
     val musicRefreshing by viewModel.musicRefreshing.collectAsStateWithLifecycle()
@@ -600,7 +614,12 @@ fun StreamShieldApp(
                     {
                         Column {
                             if (musicPlaying) {
-                                NowPlayingDownloadStrip(title = videoState.title, onDownload = viewModel::downloadCurrent)
+                                NowPlayingDownloadStrip(
+                                    title = videoState.title,
+                                    onDownload = viewModel::downloadCurrent,
+                                    sleepLabel = sleepLabel,
+                                    onSleep = viewModel::openSleepSheet
+                                )
                             }
                             // A download playing (or paused) keeps its mini-player in the Music tab.
                             if (offlineActive && videoState.videoId.isNotBlank() && videoState.videoId != miniPlayerDismissedFor) {
@@ -612,7 +631,9 @@ fun StreamShieldApp(
                                     onClose = {
                                         PlaybackCommands.send(PlaybackCommand.PAUSE)
                                         viewModel.dismissMiniPlayer()
-                                    }
+                                    },
+                                    sleepLabel = sleepLabel,
+                                    onSleepClick = viewModel::openSleepSheet
                                 )
                             }
                             AppNavigationBar(currentTab = currentTab, onSelectTab = viewModel::selectTab)
@@ -679,7 +700,9 @@ fun StreamShieldApp(
                                 onClose = {
                                     PlaybackCommands.send(PlaybackCommand.PAUSE)
                                     viewModel.dismissMiniPlayer()
-                                }
+                                },
+                                sleepLabel = sleepLabel,
+                                onSleepClick = viewModel::openSleepSheet
                             )
                         }
                     } else null
@@ -763,6 +786,8 @@ fun StreamShieldApp(
                                         onExplore = viewModel::openExplore,
                                         onHomeShown = viewModel::onHomeShown,
                                         onSearch = viewModel::search,
+                                        searchSuggestions = searchSuggestions.takeIf { !it.music }?.items.orEmpty(),
+                                        onSearchQuery = { q -> viewModel.onSearchQuery(q, music = false) },
                                         onDeleteSearch = viewModel::deleteSearch,
                                         onOpenVideo = viewModel::openVideo,
                                         onOpenChannel = { id -> viewModel.openBrowse("$HOME_URL/channel/$id") },
@@ -789,6 +814,8 @@ fun StreamShieldApp(
                                         ytm = ytmHome,
                                         videoPlaying = videoState.isPlaying && !videoState.isMusicPage,
                                         onSearch = viewModel::searchMusic,
+                                        searchSuggestions = searchSuggestions.takeIf { it.music }?.items.orEmpty(),
+                                        onSearchQuery = { q -> viewModel.onSearchQuery(q, music = true) },
                                         onOpenYouTubeMusic = viewModel::openYouTubeMusic,
                                         onPlaySong = viewModel::playSong,
                                         onPlayRadio = viewModel::playRadio,
@@ -860,7 +887,9 @@ fun StreamShieldApp(
                     isInPipMode = isInPipMode,
                     onMinimize = viewModel::collapseOffline,
                     onEnterPip = onEnterPip,
-                    modifier = Modifier.zIndex(3f)
+                    modifier = Modifier.zIndex(3f),
+                    sleepLabel = sleepLabel,
+                    onOpenSleepTimer = viewModel::openSleepSheet
                 )
             }
 
@@ -894,6 +923,9 @@ fun StreamShieldApp(
                     onToggleShowStartTime = viewModel::toggleShowStartTime,
                     onSetSmartSize = viewModel::setSmartSize,
                     onToggleUpNextCache = viewModel::toggleUpNextCache,
+                    sleepLabel = sleepLabel,
+                    onOpenSleepTimer = viewModel::openSleepSheet,
+                    onToggleStillWatching = viewModel::toggleStillWatching,
                     onRefreshSmart = viewModel::refreshSmartNow,
                     onResetDownloadQuality = viewModel::resetDownloadQuality,
                     onExportBackup = { exportBackupLauncher.launch(BackupManager.defaultFileName()) },
@@ -1014,7 +1046,47 @@ fun StreamShieldApp(
             rememberSpeed = preferences.rememberSpeedAcrossVideos,
             onSpeedSelected = viewModel::setPlaybackSpeed,
             onToggleRememberSpeed = viewModel::toggleRememberSpeed,
-            onDismiss = viewModel::dismissSpeedSheet
+            onDismiss = viewModel::dismissSpeedSheet,
+            sleepLabel = sleepLabel,
+            onOpenSleepTimer = {
+                viewModel.dismissSpeedSheet()
+                viewModel.openSleepSheet()
+            }
+        )
+    }
+
+    if (showSleepSheet && !isInPipMode) {
+        SleepTimerSheet(
+            label = sleepLabel,
+            music = videoState.isMusic,
+            onSelect = viewModel::setSleepTimer,
+            onDismiss = viewModel::dismissSleepSheet
+        )
+    }
+
+    // "Still watching?": pauses when the minute is up (see SleepRule).
+    if (stillWatching > 0L && !isInPipMode) {
+        var secondsLeft by remember(stillWatching) { mutableIntStateOf((SleepRule.ANSWER_MS / 1000).toInt()) }
+        LaunchedEffect(stillWatching) {
+            while (true) {
+                secondsLeft = ((stillWatching - android.os.SystemClock.elapsedRealtime()) / 1000).toInt().coerceAtLeast(0)
+                delay(500)
+            }
+        }
+        AlertDialog(
+            onDismissRequest = { viewModel.answerStillWatching(true) },
+            title = { Text(if (videoState.isMusic) "Still listening?" else "Still watching?") },
+            text = { Text("Playback pauses in $secondsLeft s.") },
+            confirmButton = {
+                TextButton(onClick = { viewModel.answerStillWatching(true) }, modifier = Modifier.testTag("still_watching_yes")) {
+                    Text("Keep playing")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.answerStillWatching(false) }, modifier = Modifier.testTag("still_watching_pause")) {
+                    Text("Pause")
+                }
+            }
         )
     }
 }

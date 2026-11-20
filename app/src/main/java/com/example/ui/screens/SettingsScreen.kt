@@ -58,6 +58,8 @@ import com.example.ui.AutoplayDiagnostics
 import com.example.ui.FallbackDiagnostics
 import com.example.offline.UpNextCache
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.material.icons.filled.Timer
 import com.example.ui.StartDiagnostics
 import com.example.download.SmartDownloads
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -95,6 +97,10 @@ fun SettingsScreen(
     onRefreshSmart: () -> Unit,
     onResetDownloadQuality: (Boolean) -> Unit,
     onToggleUpNextCache: (Boolean) -> Unit = {},
+    /** Sleep protection: the sleep timer ("23 min" / "end" while it runs) and "Still watching?". */
+    sleepLabel: String = "",
+    onOpenSleepTimer: () -> Unit = {},
+    onToggleStillWatching: (Boolean) -> Unit = {},
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
     onToggleAutoBackup: (Boolean) -> Unit,
@@ -204,6 +210,47 @@ fun SettingsScreen(
                             onCheckedChange = onToggleAutoplay,
                             testTag = "setting_autoplay_switch"
                         )
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                        SettingToggleRow(
+                            icon = Icons.Default.Timer,
+                            iconTint = CyberCyan,
+                            title = "Ask if I'm still watching",
+                            subtitle = "After ${if (preferences.stillWatchingMinutes > 0) preferences.stillWatchingMinutes else 45} min of playback without touching the app, " +
+                                "asks; pauses if nobody answers within a minute (screen off: pauses then)",
+                            checked = preferences.stillWatchingMinutes > 0,
+                            onCheckedChange = onToggleStillWatching,
+                            testTag = "setting_still_watching_switch"
+                        )
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onOpenSleepTimer() }
+                                .padding(vertical = 6.dp)
+                                .testTag("setting_sleep_timer_row"),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Bedtime, contentDescription = null, tint = ShieldCoral, modifier = Modifier.size(24.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Sleep timer", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "Pause after 15 min to 1 hour, or at the end of the video or song (also in the player)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text(
+                                when {
+                                    sleepLabel.isBlank() -> "Off"
+                                    sleepLabel == "end" -> "End"
+                                    else -> sleepLabel
+                                },
+                                style = MaterialTheme.typography.titleMedium,
+                                color = if (sleepLabel.isNotBlank()) ShieldCoral else MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                         HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
                         Row(
                             modifier = Modifier

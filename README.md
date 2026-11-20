@@ -36,6 +36,9 @@ it is not on the Play Store.
 - **SponsorBlock** skips sponsor reads, self-promotion and subscribe reminders (can be turned off).
 - **Background play** with notification, lock-screen and headset controls; **picture-in-picture**;
   fullscreen; playback speed from 0.25× to 3×.
+- **Sleep timer** (15 min to 1 hour, or the end of the video or song) and an optional **"Still
+  watching?"** question after 45 minutes without touching the app.
+- **Search suggestions** from YouTube and YouTube Music as you type.
 - **Autoplay** keeps going with the screen off and in picture-in-picture. Mixes, playlists and the
   YouTube Music queue always continue; suggested videos follow the Autoplay setting.
 

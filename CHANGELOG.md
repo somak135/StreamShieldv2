@@ -7,6 +7,22 @@ Releases are published from version tags: <https://github.com/streamshield-app/S
 In [somak135/StreamShieldv2](https://github.com/somak135/StreamShieldv2) after `c6f91f2` (the fork
 keeps its application id `com.aistudio.streamshield.vytkzp`):
 
+- **Search suggestions** while typing, as in the apps: Home's search shows YouTube's suggestions
+  (its suggestion service, through NewPipe Extractor), the Music search YouTube Music's own
+  (`music/get_search_suggestions`, signed out; YouTube's if that fails), under your matching
+  recent searches; an arrow puts a suggestion in the field. Asked 200 ms after typing stops,
+  kept for the session.
+- **Faster first open:** YouTube Music's home shelves are kept on the phone (`ytm_home.json`) and
+  shown at once on the next start, then refreshed; after each list refresh the first thumbnails of
+  For you, Quick picks and YouTube Music's first shelves are downloaded into the image cache
+  (12 each); 4 s after start, the empty player page loads a page without a video of the site used
+  last (m.youtube.com/feed/library or music.youtube.com/library), so the first video or song
+  opened finds the connection and the site's scripts ready.
+- **Sleep protection** (`data/SleepRule.kt`, agreed): a sleep timer (15 / 30 / 45 / 60 min or the
+  end of the current video / song) in the YouTube Music strip, the player's Speed sheet, the
+  downloaded-song player and Settings, with the time left in the mini-player; and "Still
+  watching?" (Settings → Playback, on, 45 min): after 45 min of playback without a touch or key in
+  the app (media buttons count), the app asks and pauses if nobody answers within a minute.
 - **Videos continue where you stopped, wherever you open them** (`data/ResumeRule.kt`, agreed
   rule), as in the YouTube app: from search results, Home and its chips, Subs, channel and
   playlist pages, shared links, and related videos tapped in the player page, not only from
@@ -76,7 +92,7 @@ keeps its application id `com.aistudio.streamshield.vytkzp`):
   Close; while the app is hidden they are closed too if one could hold playback (autoplay just
   moved on, or the page paused the song).
 - Tests: `MusicForYouRuleTest`, `MusicShelvesTest`, `FallbackRuleTest`, `HomeChipRuleTest`,
-  `YouTubeDestinationsTest`, `ResumeRuleTest`; shield.js tests for the
+  `YouTubeDestinationsTest`, `ResumeRuleTest`, `SleepRuleTest`; shield.js tests for the
   new prompts, YouTube Music queues, the upcoming songs, waiting for data and starting a page the
   app opened.
 

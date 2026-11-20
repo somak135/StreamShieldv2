@@ -123,6 +123,9 @@ fun HomeScreen(
     onHomeShown: () -> Unit,
     onSearch: (String) -> Unit,
     onDeleteSearch: (String) -> Unit,
+    /** Suggestions for what is typed in the search, and each change of it. */
+    searchSuggestions: List<String> = emptyList(),
+    onSearchQuery: (String) -> Unit = {},
     onOpenVideo: (videoId: String, startSec: Int) -> Unit,
     onOpenChannel: (channelId: String) -> Unit,
     onOpenSubscriptions: () -> Unit,
@@ -228,7 +231,9 @@ fun HomeScreen(
                     onSearch(q)
                 },
                 onClose = { searching = false },
-                onRemove = onDeleteSearch
+                onRemove = onDeleteSearch,
+                suggestions = searchSuggestions,
+                onQueryChange = onSearchQuery
             )
         }
         if (exploring) {

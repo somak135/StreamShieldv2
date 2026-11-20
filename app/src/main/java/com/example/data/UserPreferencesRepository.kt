@@ -42,6 +42,8 @@ data class ShieldPreferencesState(
     val smartSizeMb: Int = 1024,
     /** Keep the next songs of YouTube Music's queue downloaded while music plays (up-next cache). */
     val upNextCacheEnabled: Boolean = true,
+    /** "Still watching?" after this many minutes of playback without touching the app; 0 = off. */
+    val stillWatchingMinutes: Int = 45,
     /** Remembered download quality: video height, 0 = audio only, -1 = ask each time. */
     val downloadVideoQuality: Int = -1,
     val downloadMusicQuality: Int = -1,
@@ -76,6 +78,7 @@ class UserPreferencesRepository(private val context: Context) {
         val SHOW_START_TIME = booleanPreferencesKey("show_start_time")
         val SMART_SIZE_MB = intPreferencesKey("smart_size_mb")
         val UP_NEXT_CACHE = booleanPreferencesKey("up_next_cache")
+        val STILL_WATCHING_MIN = intPreferencesKey("still_watching_min")
         val DOWNLOAD_VIDEO_QUALITY = intPreferencesKey("download_video_quality")
         val DOWNLOAD_MUSIC_QUALITY = intPreferencesKey("download_music_quality")
         val LAST_SMART_REFRESH = longPreferencesKey("last_smart_refresh")
@@ -104,6 +107,7 @@ class UserPreferencesRepository(private val context: Context) {
             showStartTime = prefs[Keys.SHOW_START_TIME] ?: true,
             smartSizeMb = prefs[Keys.SMART_SIZE_MB] ?: 1024,
             upNextCacheEnabled = prefs[Keys.UP_NEXT_CACHE] ?: true,
+            stillWatchingMinutes = (prefs[Keys.STILL_WATCHING_MIN] ?: 45).coerceAtLeast(0),
             downloadVideoQuality = prefs[Keys.DOWNLOAD_VIDEO_QUALITY] ?: -1,
             downloadMusicQuality = prefs[Keys.DOWNLOAD_MUSIC_QUALITY] ?: -1,
             lastSmartRefreshAt = prefs[Keys.LAST_SMART_REFRESH] ?: 0L,
@@ -177,6 +181,7 @@ class UserPreferencesRepository(private val context: Context) {
         .put("showStartTime", p.showStartTime)
         .put("smartSizeMb", p.smartSizeMb)
         .put("upNextCacheEnabled", p.upNextCacheEnabled)
+        .put("stillWatchingMinutes", p.stillWatchingMinutes)
         .put("downloadVideoQuality", p.downloadVideoQuality)
         .put("downloadMusicQuality", p.downloadMusicQuality)
         .put("starredChannels", JSONArray(p.starredChannels.sorted()))
@@ -202,6 +207,7 @@ class UserPreferencesRepository(private val context: Context) {
                 if (json.has(name)) prefs[key] = json.optInt(name)
             }
             int("smartSizeMb", Keys.SMART_SIZE_MB)
+            int("stillWatchingMinutes", Keys.STILL_WATCHING_MIN)
             int("downloadVideoQuality", Keys.DOWNLOAD_VIDEO_QUALITY)
             int("downloadMusicQuality", Keys.DOWNLOAD_MUSIC_QUALITY)
             json.optJSONArray("starredChannels")?.let { array ->
@@ -215,6 +221,10 @@ class UserPreferencesRepository(private val context: Context) {
 
     suspend fun setAutoplay(enabled: Boolean) {
         context.dataStore.edit { it[Keys.AUTOPLAY] = enabled }
+    }
+
+    suspend fun setStillWatching(minutes: Int) {
+        context.dataStore.edit { it[Keys.STILL_WATCHING_MIN] = minutes.coerceAtLeast(0) }
     }
 
     suspend fun setUpNextCache(enabled: Boolean) {

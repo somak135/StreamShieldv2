@@ -2,6 +2,7 @@ package com.example.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.RestartAlt
@@ -59,7 +61,10 @@ fun PlaybackSpeedBottomSheet(
     rememberSpeed: Boolean,
     onSpeedSelected: (Float) -> Unit,
     onToggleRememberSpeed: (Boolean) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    /** The sleep timer row ("23 min" / "end" while it runs); null hides it. */
+    sleepLabel: String = "",
+    onOpenSleepTimer: (() -> Unit)? = null
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     // Dragging updates this locally; the speed is saved and applied once, when the drag ends.
@@ -270,6 +275,31 @@ fun PlaybackSpeedBottomSheet(
                     onCheckedChange = onToggleRememberSpeed,
                     modifier = Modifier.testTag("remember_speed_switch")
                 )
+            }
+            if (onOpenSleepTimer != null) {
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenSleepTimer)
+                        .padding(vertical = 12.dp)
+                        .testTag("speed_sheet_sleep_timer"),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Bedtime, contentDescription = null, tint = if (sleepLabel.isNotBlank()) ShieldCoral else MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text("Sleep timer", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                    Text(
+                        when {
+                            sleepLabel.isBlank() -> "Off"
+                            sleepLabel == "end" -> "End of video"
+                            else -> sleepLabel
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (sleepLabel.isNotBlank()) ShieldCoral else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
     }

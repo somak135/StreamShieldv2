@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.PictureInPictureAlt
@@ -30,6 +31,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.example.data.WebVideoState
 import com.example.offline.OfflinePlayerController
 import com.example.ui.theme.EmeraldSafe
+import com.example.ui.theme.ShieldCoral
 
 /**
  * Full-screen player for downloads (works offline): the video, or the cover for a song, with
@@ -42,7 +44,10 @@ fun OfflinePlayerScreen(
     isInPipMode: Boolean,
     onMinimize: () -> Unit,
     onEnterPip: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** The sleep timer button ("23 min" / "end" while it runs). */
+    sleepLabel: String = "",
+    onOpenSleepTimer: () -> Unit = {}
 ) {
     BackHandler(enabled = !isInPipMode, onBack = onMinimize)
     Surface(color = Color.Black, modifier = modifier.fillMaxSize().testTag("offline_player")) {
@@ -76,6 +81,13 @@ fun OfflinePlayerScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
+                    }
+                    IconButton(onClick = onOpenSleepTimer, modifier = Modifier.testTag("offline_sleep_timer")) {
+                        Icon(
+                            Icons.Default.Bedtime,
+                            contentDescription = "Sleep timer",
+                            tint = if (sleepLabel.isNotBlank()) ShieldCoral else MaterialTheme.colorScheme.onSurface
+                        )
                     }
                     if (video.videoWidth > 0) {
                         IconButton(onClick = onEnterPip) {

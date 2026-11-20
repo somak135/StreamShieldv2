@@ -52,19 +52,36 @@ data class YtmPage(
  */
 object YouTubeMusicHome {
     private const val BROWSE_URL = "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false"
+    private const val SUGGEST_URL = "https://music.youtube.com/youtubei/v1/music/get_search_suggestions?prettyPrint=false"
     private const val HOME = "FEmusic_home"
 
     /** The first page; [chipParams]: a chip's filter ("" = the whole home). */
     fun fetch(chipParams: String = ""): YtmPage {
         val body = JSONObject().put("context", context("")).put("browseId", HOME)
         if (chipParams.isNotBlank()) body.put("params", chipParams)
-        return parse(post(body, ""))
+        return parse(post(BROWSE_URL, body, ""))
+    }
+
+    /**
+     * Blocking: YouTube Music's search suggestions for what was typed so far (the text ones, as
+     * its search box lists them; shape seen on the live site, November 2026:
+     * `contents[].searchSuggestionsSectionRenderer.contents[].searchSuggestionRenderer`).
+     */
+    fun suggestions(query: String): List<String> {
+        val body = JSONObject().put("context", context("")).put("input", query)
+        val root = post(SUGGEST_URL, body, "")
+        return root.optJSONArray("contents").objects()
+            .flatMap { it.optJSONObject("searchSuggestionsSectionRenderer")?.optJSONArray("contents").objects() }
+            .mapNotNull { it.optJSONObject("searchSuggestionRenderer")?.optJSONObject("suggestion") }
+            .map { text(it) }
+            .filter { it.isNotBlank() }
+            .distinct()
     }
 
     /** The shelves after [page] (its [YtmPage.continuation] must not be blank). */
     fun more(page: YtmPage): YtmPage {
         val body = JSONObject().put("context", context(page.visitorData)).put("continuation", page.continuation)
-        val next = parse(post(body, page.visitorData))
+        val next = parse(post(BROWSE_URL, body, page.visitorData))
         return next.copy(chips = page.chips, visitorData = next.visitorData.ifBlank { page.visitorData })
     }
 
@@ -93,7 +110,7 @@ object YouTubeMusicHome {
     /** Seen on music.youtube.com on 30 Oct 2026. */
     private const val FALLBACK_CLIENT_VERSION = "1.20261027.10.00"
 
-    private fun post(body: JSONObject, visitorData: String): JSONObject {
+    private fun post(url: String, body: JSONObject, visitorData: String): JSONObject {
         NewPipeSupport.ensureInit()
         val version = body.optJSONObject("context")?.optJSONObject("client")?.optString("clientVersion").orEmpty()
         val headers = HashMap<String, List<String>>()
@@ -103,7 +120,7 @@ object YouTubeMusicHome {
         headers["X-YouTube-Client-Version"] = listOf(version)
         if (visitorData.isNotBlank()) headers["X-Goog-Visitor-Id"] = listOf(visitorData)
         webViewCookies()?.let { headers["Cookie"] = listOf(it) }
-        val response = NewPipe.getDownloader().postWithContentTypeJson(BROWSE_URL, headers, body.toString().toByteArray())
+        val response = NewPipe.getDownloader().postWithContentTypeJson(url, headers, body.toString().toByteArray())
         if (response.responseCode() != 200) throw IllegalStateException("HTTP ${response.responseCode()}")
         return JSONObject(response.responseBody())
     }
@@ -235,6 +252,47 @@ object YouTubeMusicHome {
     private fun JSONArray?.objects(): List<JSONObject> {
         if (this == null) return emptyList()
         return (0 until length()).mapNotNull { optJSONObject(it) }
+    }
+
+    // ---- kept on the phone (shown at once on the next start, refreshed in the background) -----
+
+    /** The home's chips and first shelves as JSON (see [restore]). */
+    fun save(state: YtmHomeState): String {
+        val root = JSONObject().put("v", 1).put("at", state.loadedAt)
+        root.put("chips", JSONArray().apply {
+            state.chips.forEach { put(JSONObject().put("t", it.title).put("p", it.params)) }
+        })
+        root.put("shelves", JSONArray().apply {
+            state.shelves.forEach { shelf ->
+                put(JSONObject().put("t", shelf.title).put("s", shelf.strapline).put("r", shelf.rows).put("i", JSONArray().apply {
+                    shelf.items.forEach { i ->
+                        put(
+                            JSONObject().put("k", i.kind.name).put("t", i.title).put("s", i.subtitle).put("u", i.thumbnailUrl)
+                                .put("v", i.videoId).put("l", i.playlistId).put("b", i.browseId).put("w", i.wide)
+                        )
+                    }
+                }))
+            }
+        })
+        return root.toString()
+    }
+
+    /** What [save] wrote; null if unreadable. [YtmHomeState.loadedAt] is 0 (to be refreshed). */
+    fun restore(text: String): YtmHomeState? = try {
+        val root = JSONObject(text)
+        val chips = root.optJSONArray("chips").objects().map { YtmChip(it.optString("t"), it.optString("p"), false) }
+            .filter { it.title.isNotBlank() }
+        val shelves = root.optJSONArray("shelves").objects().mapNotNull { o ->
+            val items = o.optJSONArray("i").objects().mapNotNull { i ->
+                val kind = try { YtmKind.valueOf(i.optString("k")) } catch (_: Exception) { YtmKind.OTHER }
+                YtmItem(kind, i.optString("t"), i.optString("s"), i.optString("u"), i.optString("v"), i.optString("l"), i.optString("b"), i.optBoolean("w"))
+                    .takeIf { it.title.isNotBlank() }
+            }
+            if (items.isEmpty()) null else YtmShelf(o.optString("t"), o.optString("s"), items, o.optBoolean("r"))
+        }
+        if (shelves.isEmpty()) null else YtmHomeState(chips = chips, shelves = shelves)
+    } catch (_: Exception) {
+        null
     }
 
     /** The page in YouTube Music that an item opens (in the player page). */

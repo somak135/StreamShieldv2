@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Movie
@@ -19,6 +20,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.RadioButton
@@ -148,7 +150,13 @@ fun DownloadQualitySheet(
 
 /** Above the tabs while a song plays in YouTube Music: download it. */
 @Composable
-fun NowPlayingDownloadStrip(title: String, onDownload: () -> Unit) {
+fun NowPlayingDownloadStrip(
+    title: String,
+    onDownload: () -> Unit,
+    /** The sleep timer button at the end ("23 min" / "end" while it runs). */
+    sleepLabel: String = "",
+    onSleep: (() -> Unit)? = null
+) {
     Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -164,8 +172,22 @@ fun NowPlayingDownloadStrip(title: String, onDownload: () -> Unit) {
                 "Download “${title.ifBlank { "this song" }}”",
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
             )
+            if (onSleep != null) {
+                if (sleepLabel.isNotBlank()) {
+                    Text(if (sleepLabel == "end") "end" else sleepLabel, style = MaterialTheme.typography.labelSmall, color = ShieldCoral)
+                }
+                IconButton(onClick = onSleep, modifier = Modifier.size(36.dp).testTag("music_sleep_timer")) {
+                    Icon(
+                        Icons.Default.Bedtime,
+                        contentDescription = "Sleep timer",
+                        tint = if (sleepLabel.isNotBlank()) ShieldCoral else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
         }
     }
 }

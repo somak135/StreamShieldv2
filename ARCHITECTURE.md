@@ -310,6 +310,22 @@ and `returnToYouTubeMusic` opens the queue's next song (`webStartRequests` →
 switch lasts, YouTube Music starting by itself is paused again (`webPauseRequests`) unless its page
 is on screen; anything the user opens on YouTube ends the switch (`switchToWebPlayback`).
 
+**Search suggestions.** `SearchScreen` reports each change (`onQueryChange`); the view model
+asks after a 200 ms pause (`onSearchQuery`): `NewPipeSupport.searchSuggestions` (YouTube) or
+`YouTubeMusicHome.suggestions` (YouTube Music's search, YouTube's as a fallback), cached for the
+session.
+
+**Fast start.** `ytm_home.json` holds YouTube Music's first shelves (`YouTubeMusicHome.save` /
+`restore`; restored with `loadedAt` 0, so the Music tab refreshes them in the background).
+`prefetchImages` puts the first thumbnails of each list into Coil's disk cache.
+`warmUpRequests` → `BrowserController.warmUp` loads a page without a video only while the player
+page has loaded nothing.
+
+**Sleep protection** (`data/SleepRule.kt`). The view model's 1 s loop runs `sleepTick` and
+`stillWatchingTick`; `sleepAtEnd` checks each player state for an end-of-video timer. Pausing
+goes through `PlaybackCommands` (both players). Activity is `MainActivity.onUserInteraction` and
+any `PlaybackCommands` command.
+
 **Continuing where you stopped** (`data/ResumeRule.kt`). The view model keeps the newest
 history entry per video (`resumePoints`). `openInPlayer` adds YouTube's `t=` to a watch link
 that has no time (`withResume`); in the player page, a tapped video link is noted by shield.js
@@ -441,7 +457,8 @@ button, calls `onHideCustomView`.
   `recommend/ForYouRuleTest.kt` cover the two reviewed rules, `recommend/MusicForYouRuleTest.kt`
   the music rule, `offline/FallbackRuleTest.kt` the switch to downloaded songs,
   `recommend/HomeChipRuleTest.kt` Home's chips and `recommend/YouTubeDestinationsTest.kt` reading
-  YouTube's topic pages, `data/ResumeRuleTest.kt` where opened videos continue.
+  YouTube's topic pages, `data/ResumeRuleTest.kt` where opened videos continue, `data/SleepRuleTest.kt` the sleep timer and
+  "Still watching?".
 - `tools/shield-js-test/shield.test.mjs` runs `shield.js` in headless Chromium against mock
   YouTube pages. It covers pruning, the ad fallback, background-play events, speed, SponsorBlock,
   PiP layout, page routing, the heartbeat, play/pause tap fixes, Subscribe and Like / Dislike

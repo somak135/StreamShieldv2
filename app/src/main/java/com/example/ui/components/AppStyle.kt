@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,6 +30,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.NorthWest
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -268,8 +272,10 @@ fun FeedVideoCard(
 }
 
 /**
- * Full-screen search as in the apps: Back, the query field (focused), then recent searches.
- * [recent] may be empty; [onRemove] null hides the remove buttons.
+ * Full-screen search as in the apps: Back, the query field (focused), then recent searches, and
+ * while typing the matching recent searches and [suggestions] (each with an arrow that puts it
+ * in the field). [recent] and [suggestions] may be empty; [onRemove] null hides the remove
+ * buttons; [onQueryChange] gets every change (for suggestions).
  */
 @Composable
 fun SearchScreen(
@@ -278,22 +284,39 @@ fun SearchScreen(
     onSearch: (String) -> Unit,
     onClose: () -> Unit,
     onRemove: ((String) -> Unit)? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    suggestions: List<String> = emptyList(),
+    onQueryChange: (String) -> Unit = {}
 ) {
     var query by remember { mutableStateOf("") }
     val focus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { focus.requestFocus() }
+    LaunchedEffect(Unit) {
+        focus.requestFocus()
+        onQueryChange("")
+    }
+    fun setQuery(text: String) {
+        query = text
+        onQueryChange(text)
+    }
+    val typed = query.trim()
+    val rows: List<Pair<String, Boolean>> = if (typed.isEmpty()) {
+        recent.map { it to true }
+    } else {
+        val mine = recent.filter { it.contains(typed, ignoreCase = true) && !it.equals(typed, ignoreCase = true) }.take(3)
+        mine.map { it to true } +
+            suggestions.filter { sug -> mine.none { it.equals(sug, ignoreCase = true) } }.take(10).map { it to false }
+    }
     Column(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(end = 8.dp)) {
             IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
             TextField(
                 value = query,
-                onValueChange = { query = it },
+                onValueChange = { setQuery(it) },
                 placeholder = { Text(placeholder) },
                 singleLine = true,
                 trailingIcon = {
                     if (query.isNotEmpty()) {
-                        IconButton(onClick = { query = "" }) { Icon(Icons.Default.Close, contentDescription = "Clear") }
+                        IconButton(onClick = { setQuery("") }) { Icon(Icons.Default.Close, contentDescription = "Clear") }
                     }
                 },
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
@@ -317,27 +340,35 @@ fun SearchScreen(
                     .testTag("search_screen_input")
             )
         }
-        recent.forEach { entry ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onSearch(entry) }
-                    .padding(start = 16.dp, end = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(20.dp))
-                Text(
-                    entry,
-                    style = MaterialTheme.typography.bodyLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            items(rows, key = { (if (it.second) "r:" else "s:") + it.first }) { (entry, isRecent) ->
+                Row(
                     modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 16.dp, vertical = 14.dp)
-                )
-                if (onRemove != null) {
-                    IconButton(onClick = { onRemove(entry) }) {
-                        Icon(Icons.Default.Close, contentDescription = "Remove search", modifier = Modifier.size(18.dp))
+                        .fillMaxWidth()
+                        .clickable { onSearch(entry) }
+                        .padding(start = 16.dp, end = 4.dp)
+                        .testTag(if (isRecent) "search_recent" else "search_suggestion"),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(if (isRecent) Icons.Default.History else Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Text(
+                        entry,
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 16.dp, vertical = 14.dp)
+                    )
+                    if (typed.isEmpty() && isRecent && onRemove != null) {
+                        IconButton(onClick = { onRemove(entry) }) {
+                            Icon(Icons.Default.Close, contentDescription = "Remove search", modifier = Modifier.size(18.dp))
+                        }
+                    } else if (typed.isNotEmpty()) {
+                        // As in the apps: the arrow puts the text in the field to keep typing.
+                        IconButton(onClick = { setQuery("$entry ") }) {
+                            Icon(Icons.Default.NorthWest, contentDescription = "Edit this search", modifier = Modifier.size(18.dp))
+                        }
                     }
                 }
             }

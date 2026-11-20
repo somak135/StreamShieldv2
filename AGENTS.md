@@ -189,6 +189,10 @@ installs on a phone over USB.
   (`playbackMayBeHeld`), to keep the background heartbeat cheap.
 - **Like / Dislike buttons** follow the Subscribe pattern (capture-phase stop, sync state call).
   Comments have Like buttons too ("Like this comment …"); they must stay YouTube's.
+- **Fast start warm-up.** `BrowserController.warmUp` must only load while the player page is
+  empty (`webView.url` null / about:blank): it runs 4 s after start, and a video opened meanwhile
+  (a shared link, a quick tap) must win. Its pages have no video (sign-in prompts), so nothing
+  plays and the page is never shown unless the user opens YouTube Music.
 - **Resuming a video tapped in the player page.** YouTube changes the URL (pushState) before
   the player holds the new video, so a seek at that moment lands on the old one; `pendingSeek`
   with `afterLoad` waits for `loadedmetadata` after the URL change (or a matching length). Only

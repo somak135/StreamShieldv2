@@ -170,6 +170,18 @@ class BrowserController(
         load(url)
     }
 
+    /**
+     * Fast start: loads a YouTube page without a video ([url]) if the player page has loaded
+     * nothing yet, so the first video or song opened later finds the connection and the site's
+     * scripts ready.
+     */
+    fun warmUp(url: String) {
+        if (destroyed) return
+        val current = webView.url
+        if (!current.isNullOrBlank() && current != "about:blank") return
+        load(url)
+    }
+
     /** After [loadAndStart]: start the song once its page is there, although nobody tapped it. */
     private var autoStartAfterLoad = false
 

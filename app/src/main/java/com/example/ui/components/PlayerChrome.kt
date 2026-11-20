@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -13,6 +14,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.material.icons.filled.TimerOff
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
 import androidx.compose.material.icons.filled.Close
@@ -52,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import com.example.data.PlaylistSummary
 import com.example.data.WebVideoState
 import com.example.ui.CurrentVideoActions
+import com.example.ui.SLEEP_END_OF_VIDEO
 import com.example.ui.screens.NameDialog
 import com.example.ui.theme.ShieldCoral
 
@@ -63,7 +67,10 @@ fun MiniPlayer(
     onTogglePlay: () -> Unit,
     onNext: () -> Unit,
     onClose: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** While the sleep timer runs ("23 min" / "end"), shown under the title; a tap opens it. */
+    sleepLabel: String = "",
+    onSleepClick: () -> Unit = {}
 ) {
     Surface(tonalElevation = 3.dp, modifier = modifier.fillMaxWidth().testTag("mini_player")) {
         Column {
@@ -86,13 +93,28 @@ fun MiniPlayer(
                 Spacer(modifier = Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(video.title.ifBlank { "Playing" }, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(
-                        video.channel,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    if (sleepLabel.isNotBlank()) {
+                        Row(
+                            modifier = Modifier.clickable(onClick = onSleepClick).testTag("mini_player_sleep"),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Bedtime, contentDescription = null, tint = ShieldCoral, modifier = Modifier.size(12.dp))
+                            Text(
+                                " " + sleepText(sleepLabel, video.isMusic),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = ShieldCoral,
+                                maxLines = 1
+                            )
+                        }
+                    } else {
+                        Text(
+                            video.channel,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
                 IconButton(onClick = onTogglePlay, modifier = Modifier.testTag("mini_player_toggle")) {
                     Icon(if (video.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = if (video.isPlaying) "Pause" else "Play")
@@ -103,6 +125,54 @@ fun MiniPlayer(
                 IconButton(onClick = onClose, modifier = Modifier.testTag("mini_player_close")) {
                     Icon(Icons.Default.Close, contentDescription = "Close")
                 }
+            }
+        }
+    }
+}
+
+/** "Pauses in 23 min" / "Pauses at the end of this song" from the view model's sleep label. */
+fun sleepText(label: String, music: Boolean): String = when {
+    label.isBlank() -> "Off"
+    label == "end" -> "Pauses at the end of this ${if (music) "song" else "video"}"
+    else -> "Pauses in $label"
+}
+
+/** The sleep timer, as in the apps: pause after a while, or at the end of what is playing. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SleepTimerSheet(label: String, music: Boolean, onSelect: (minutes: Int) -> Unit, onDismiss: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(modifier = Modifier.padding(bottom = 24.dp)) {
+            Text(
+                "Sleep timer",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 20.dp)
+            )
+            Text(
+                sleepText(label, music),
+                style = MaterialTheme.typography.bodySmall,
+                color = if (label.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant else ShieldCoral,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
+            )
+            listOf(15, 30, 45, 60).forEach { m ->
+                ListItem(
+                    headlineContent = { Text(if (m == 60) "1 hour" else "$m minutes") },
+                    leadingContent = { Icon(Icons.Default.Bedtime, contentDescription = null) },
+                    modifier = Modifier.clickable { onSelect(m) }.testTag("sleep_$m")
+                )
+            }
+            ListItem(
+                headlineContent = { Text("End of this ${if (music) "song" else "video"}") },
+                leadingContent = { Icon(Icons.Default.Bedtime, contentDescription = null) },
+                modifier = Modifier.clickable { onSelect(SLEEP_END_OF_VIDEO) }.testTag("sleep_end")
+            )
+            if (label.isNotBlank()) {
+                ListItem(
+                    headlineContent = { Text("Turn off") },
+                    leadingContent = { Icon(Icons.Default.TimerOff, contentDescription = null) },
+                    modifier = Modifier.clickable { onSelect(0) }.testTag("sleep_off")
+                )
             }
         }
     }
